@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="author" content="Zekri R (ZEKRI.ID)">
+    <meta name="description" content="Real-time monitoring dashboard for Votol Controller and BMS via CAN bus">
+    <title>Votol BLE Dashboard - by ZEKRI.ID</title>
+    <style>
+        :root {
+            --p-color: #00ff88;
+            --bg: #0b0c10;
+            --card: #1f2833;
+            --text: #c5c6c7;
+            --warn: #ffab00;
+            --danger: #ff3d00;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1,
+        h2,
+        h3 {
+            color: var(--p-color);
+            margin-top: 0;
+        }
+
+        /* Dashboard Grid */
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: var(--card);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            border: 1px solid #333;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            border-color: var(--p-color);
+            transform: translateY(-2px);
+        }
+
+        .card .label {
+            font-size: 0.8em;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .card .value {
+            font-size: 2.2em;
+            font-weight: bold;
+            color: #fff;
+            z-index: 2;
+            position: relative;
+        }
+
+        .card .unit {
+            font-size: 0.4em;
+            color: #aaa;
+            margin-left: 3px;
+        }
+
+        /* Specific Card Styles */
+        .card.temp .value {
+            color: var(--warn);
+        }
+
+        .card.temp.hot .value {
+            color: var(--danger);
+            animation: pulse 1s infinite;
+        }
+
+        .card.volt .value {
+            color: #00e5ff;
+        }
+
+        .card.volt .unit {
+            color: #00e5ff;
+        }
+
+        .card.status {
+            border-color: #555;
+        }
+
+        .card.status .value {
+            font-size: 1.5em;
+            color: #aaa;
+        }
+
+        .card.status.active .value {
+            color: var(--p-color);
+            text-shadow: 0 0 10px var(--p-color);
+        }
+
+        .card.status.park .value {
+            color: var(--danger);
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        /* Cell Grid */
+        .cell-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+            gap: 8px;
+        }
+
+        .cell-box {
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 5px;
+            text-align: center;
+            font-size: 0.8em;
+        }
+
+        .cell-id {
+            color: #666;
+            font-size: 0.7em;
+            margin-bottom: 2px;
+        }
+
+        .cell-val {
+            color: #fff;
+            font-weight: bold;
+        }
+
+        .balancing {
+            border-color: #00e5ff !important;
+            box-shadow: 0 0 8px #00e5ff;
+            animation: pulse-blue 1s infinite;
+        }
+
+        @keyframes pulse-blue {
+            0% {
+                box-shadow: 0 0 5px #00e5ff;
+            }
+
+            50% {
+                box-shadow: 0 0 15px #00e5ff;
+            }
+
+            100% {
+                box-shadow: 0 0 5px #00e5ff;
+            }
+        }
+
+        .connected {
+            color: #00ff00;
+        }
+
+        .disconnected {
+            color: #ff0000;
+        }
+
+        /* footer status optimized */
+        .footer-status {
+            margin-top: 20px;
+            padding: 10px;
+            background: #111;
+            border-radius: 5px;
+            font-size: 0.8em;
+            color: #888;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            h1 {
+                font-size: 1.5rem;
+            }
+
+            .dashboard {
+                grid-template-columns: repeat(2, 1fr);
+                /* Force 2 columns on mobile */
+                gap: 10px;
+            }
+
+            /* Speed card full width */
+            #card-speed {
+                grid-column: 1 / -1;
+            }
+
+            .card .value {
+                font-size: 1.8em;
+            }
+
+            .card .label {
+                font-size: 0.7em;
+            }
+
+            /* Dual grid (odo/trip) becomes single column */
+            .dual-grid {
+                grid-template-columns: 1fr !important;
+            }
+
+            /* Buttons stack */
+            .ctl-buttons {
+                flex-direction: column;
+            }
+
+            .ctl-buttons button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h1>⚡ Votol Bluetooth Dashboard</h1>
+        <div id="connection" class="disconnected">🔌 Disconnected</div>
+    </div>
+
+    <!-- MAIN DASHBOARD -->
+    <div class="dashboard">
+        <!-- SPEEDOMETER (Full Width) -->
+        <div class="card speed" id="card-speed" style="grid-column: 1 / -1;">
+            <div class="label">Speed</div>
+            <div class="value"><span id="val-speed">0</span><span class="unit">KM/H</span></div>
+            <div style="margin-top:8px; color:#888; font-size:0.9em;">RPM: <span id="val-rpm">0</span></div>
+        </div>
+
+        <!-- VOLTAGE -->
+        <div class="card volt" id="card-volt">
+            <div class="label">Voltage</div>
+            <div class="value"><span id="val-volt">--</span><span class="unit">V</span></div>
+        </div>
+
+        <!-- SOC (Battery %) -->
+        <div class="card" id="card-soc">
+            <div class="label">Battery</div>
+            <div class="value"><span id="val-soc">--</span><span class="unit">%</span></div>
+        </div>
+
+        <!-- STATUS -->
+        <div class="card status" id="card-mode">
+            <div class="label">Mode</div>
+            <div class="value" id="val-mode">PARK</div>
+        </div>
+
+        <!-- CURRENT -->
+        <div class="card" id="card-camp">
+            <div class="label">Current</div>
+            <div class="value"><span id="val-amps">--</span><span class="unit">A</span></div>
+            <div style="margin-top:5px; color:#aaa; font-size:0.85em;">Power: <span id="val-power-sub">0</span> W</div>
+        </div>
+
+        <!-- POWER -->
+        <div class="card" id="card-power">
+            <div class="label">Power</div>
+            <div class="value"><span id="val-power">--</span><span class="unit">W</span></div>
+        </div>
+
+        <!-- Cell Temps and BMS Info removed from UI (not sent via BLE due to size) -->
+        <!-- Check Serial Monitor for this data -->
+
+
+
+
+        <!-- TEMPS -->
+        <div class="card temp" id="card-ctrl">
+            <div class="label">Controller</div>
+            <div class="value"><span id="val-ctrl">--</span><span class="unit">°C</span></div>
+        </div>
+        <div class="card temp" id="card-motor">
+            <div class="label">Motor</div>
+            <div class="value"><span id="val-motor">--</span><span class="unit">°C</span></div>
+        </div>
+        <div class="card temp" id="card-batt">
+            <div class="label">Battery</div>
+            <div class="value"><span id="val-batt">--</span><span class="unit">°C</span></div>
+        </div>
+    </div>
+
+    <!-- BATTERY HEALTH SECTION -->
+    <div
+        style="margin-bottom: 20px; border: 2px solid #00ff88; padding: 15px; border-radius: 10px; background:#0a1a0a;">
+        <h3 style="margin-top:0; color:#00ff88;">🔋 Battery Health</h3>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:15px;">
+            <div class="card" style="border-color:#00ff88;">
+                <div class="label">SOH</div>
+                <div class="value"><span id="val-soh">--</span><span class="unit">%</span></div>
+            </div>
+            <div class="card" style="border-color:#00e5ff;">
+                <div class="label">Cycles</div>
+                <div class="value" id="val-cycles">--</div>
+            </div>
+            <div class="card" style="border-color:#00ffab;">
+                <div class="label">Capacity</div>
+                <div class="value"><span id="val-capacity">--</span><span class="unit">Ah</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CELL STATISTICS SECTION -->
+    <div
+        style="margin-bottom: 20px; border: 2px solid #00e5ff; padding: 15px; border-radius: 10px; background:#001a1a;">
+        <h3 style="margin-top:0; color:#00e5ff;">📊 Cell Voltage Statistics</h3>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:15px;">
+            <div class="card" style="border-color:#ffab00;">
+                <div class="label">Cell Delta</div>
+                <div class="value"><span id="val-delta-bms">--</span><span class="unit">mV</span></div>
+            </div>
+            <div style="border:1px solid #333; padding:12px; border-radius:8px; background:var(--card);">
+                <div style="color:#888; font-size:0.8em; margin-bottom:5px;">HIGHEST CELL</div>
+                <div style="font-size:1.5em; font-weight:bold; color:#00ff88;"><span id="val-highest-volt">--</span> mV
+                </div>
+                <div style="color:#666; font-size:0.8em; margin-top:3px;">Cell #<span id="val-highest-cell">-</span>
+                </div>
+            </div>
+            <div style="border:1px solid #333; padding:12px; border-radius:8px; background:var(--card);">
+                <div style="color:#888; font-size:0.8em; margin-bottom:5px;">LOWEST CELL</div>
+                <div style="font-size:1.5em; font-weight:bold; color:#ff3d00;"><span id="val-lowest-volt">--</span> mV
+                </div>
+                <div style="color:#666; font-size:0.8em; margin-top:3px;">Cell #<span id="val-lowest-cell">-</span>
+                </div>
+            </div>
+            <div style="border:1px solid #333; padding:12px; border-radius:8px; background:var(--card);">
+                <div style="color:#888; font-size:0.8em; margin-bottom:5px;">AVERAGE</div>
+                <div style="font-size:1.5em; font-weight:bold; color:#00e5ff;"><span id="val-avg-volt">--</span> mV
+                </div>
+            </div>
+        </div>
+
+
+
+        <!-- SOC CALIBRATION PANEL -->
+        <div
+            style="margin-bottom: 20px; border: 2px solid #ffab00; padding: 15px; border-radius: 10px; background:#1a1500;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px;">
+                <h3 style="color:#ffab00;">📊 SOC Calibration Tool</h3>
+                <button onclick="clearSOCLog()"
+                    style="background:#ff3d00; color:#fff; border:none; padding:5px 15px; border-radius:5px; cursor:pointer;">Clear
+                    Log</button>
+            </div>
+
+            <!-- Current SOC Display -->
+            <div style="background:#000; padding:15px; border-radius:5px; margin-bottom:15px;">
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px; text-align:center;">
+                    <div>
+                        <div style="color:#888; font-size:0.9em;">Raw Value (Decimal)</div>
+                        <div id="soc-raw-dec" style="color:#00ff88; font-size:1.8em; font-weight:bold;">--</div>
+                    </div>
+                    <div>
+                        <div style="color:#888; font-size:0.9em;">Raw Value (Hex)</div>
+                        <div id="soc-raw-hex" style="color:#00e5ff; font-size:1.8em; font-weight:bold;">--</div>
+                    </div>
+                    <div>
+                        <div style="color:#888; font-size:0.9em;">Calculated %</div>
+                        <div id="soc-calculated" style="color:#ffab00; font-size:1.8em; font-weight:bold;">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Entry -->
+            <div style="background:#000; padding:15px; border-radius:5px; margin-bottom:15px;">
+                <div style="color:#ffab00; font-weight:bold; margin-bottom:10px;">📝 Record Data Point:</div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <div style="flex:1;">
+                        <label style="color:#888; font-size:0.9em;">Speedometer Reading (%):</label>
+                        <input type="number" id="speedometer-input" placeholder="Enter %" min="0" max="100"
+                            style="width:100%; padding:10px; background:#222; border:1px solid #555; color:#fff; border-radius:5px; font-size:1.1em; margin-top:5px;">
+                    </div>
+                    <button onclick="addSOCDataPoint()"
+                        style="background:#00ff88; color:#000; border:none; padding:12px 25px; border-radius:5px; font-weight:bold; cursor:pointer; margin-top:25px;">
+                        ➕ Add to Log
+                    </button>
+                </div>
+            </div>
+
+            <!-- Data Log -->
+            <div style="background:#000; padding:15px; border-radius:5px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <div style="color:#888; font-weight:bold;">Collected Data Points: <span id="soc-count"
+                            style="color:#00ff88;">0</span></div>
+                    <button onclick="exportSOCData()" id="btn-export-soc"
+                        style="background:#00e5ff; color:#000; border:none; padding:5px 15px; border-radius:5px; font-weight:bold; cursor:pointer;"
+                        disabled>
+                        💾 Export CSV
+                    </button>
+                </div>
+                <div id="soc-log" style="max-height:200px; overflow-y:auto; font-family:monospace; font-size:0.9em;">
+                    <div style="color:#666;">No data collected yet. Enter speedometer reading and click "Add to Log".
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BMS SECTION -->
+        <div style="margin-bottom: 20px; border: 1px solid #333; padding: 15px; border-radius: 10px; background:#111;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px;">
+                <h3>🔋 BMS Inspector (23 Cells)</h3>
+                <div style="font-size:1.1em;">
+                    <span style="color:#888;">Δ Cell:</span>
+                    <span id="bms-delta" style="color:#fff; font-weight:bold; font-size:1.3em;">0</span>
+                </div>
+            </div>
+
+            <!-- Balance Status Info -->
+            <div
+                style="display:flex; gap:15px; margin-bottom:10px; font-size:0.9em; border-bottom:1px solid #333; padding-bottom:10px;">
+                <div>
+                    <span style="color:#888;">Mode:</span>
+                    <span id="val-bal-mode" style="color:#00ff88; font-weight:bold;">--</span>
+                </div>
+                <div>
+                    <span style="color:#888;">Activity:</span>
+                    <span id="val-bal-status" style="color:#00e5ff; font-weight:bold;">--</span>
+                </div>
+            </div>
+            <!-- Raw Hex Debug (Visible) -->
+            <div style="margin-bottom:10px; font-family:monospace; font-size:0.8em; color:#666;">
+                RAW HEX: <span id="debug-balance-hex-visible" style="color:#ffab00;">--</span>
+            </div>
+            <div class="cell-grid" id="cellGrid" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="footer-status">
+            CAN Rate: <span id="can-rate">0</span> msg/s |
+            Mode: Bluetooth Serial |
+            UI: Python Flask
+        </div>
+
+        <!-- RECORDING CONTROLS -->
+        <div style="margin-top:20px; border:1px solid #333; padding:15px; border-radius:10px; background:#111;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3>🔴 Data Recorder</h3>
+                <div id="rec-status" style="color:#888;">Ready</div>
+            </div>
+            <div class="ctl-buttons" style="margin-top:10px; display:flex; gap:10px;">
+                <button id="btn-start" onclick="startRecording()"
+                    style="background:#00e5ff; color:#000; border:none; padding:10px 20px; border-radius:5px; font-weight:bold; cursor:pointer;">▶
+                    Start</button>
+                <button id="btn-stop" onclick="stopRecording()"
+                    style="background:#ff3d00; color:#fff; border:none; padding:10px 20px; border-radius:5px; font-weight:bold; cursor:pointer; display:none;">⏹
+                    Stop</button>
+                <button id="btn-export" onclick="exportData()"
+                    style="background:#00ff88; color:#000; border:none; padding:10px 20px; border-radius:5px; font-weight:bold; cursor:pointer;"
+                    disabled>💾 Export .txt</button>
+                <button id="btn-clear" onclick="clearData()"
+                    style="background:#444; color:#fff; border:none; padding:10px 20px; border-radius:5px; font-weight:bold; cursor:pointer;">🗑
+                    Clear</button>
+            </div>
+            <div style="margin-top:10px; color:#666; font-family:monospace;">
+                Records: <span id="rec-count">0</span> | Size: <span id="rec-size">0</span> KB
+            </div>
+        </div>
+
+        <!-- CAN Sniffer Panel -->
+        <div style="margin-top:20px; border:1px solid #333; padding:15px; border-radius:10px; background:#111;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <h3>🔍 CAN Sniffer (Live USB Serial)</h3>
+                <button onclick="clearSniffer()"
+                    style="background:#ff3d00; color:#fff; border:none; padding:5px 15px; border-radius:5px; cursor:pointer;">Clear</button>
+            </div>
+            <div id="canSnifferLog"
+                style="font-family:monospace; font-size:0.85em; max-height:300px; overflow-y:auto; background:#000; padding:10px; border-radius:5px;">
+                <div style="color:#666;">Waiting for CAN data from USB Serial...</div>
+            </div>
+            <div style="margin-top:10px; color:#666; font-size:0.9em;">
+                Lines: <span id="sniffer-count">0</span> | <button onclick="copySniffer()" style="padding:5px 10px;">📋
+                    Copy
+                    All</button>
+            </div>
+        </div>
+
+        <!-- Debug Panel (Collapsible) -->
+        <div style="margin-top:20px; border:1px solid #333; padding:15px; border-radius:10px; background:#111;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; cursor:pointer;"
+                onclick="document.getElementById('debugPanel').style.display = document.getElementById('debugPanel').style.display === 'none' ? 'block' : 'none';">
+                <h3>🔍 Debug Info (Click to Toggle)</h3>
+            </div>
+            <div id="debugPanel" style="display:none;">
+                <table style="width:100%; font-family:monospace; font-size:0.9em;">
+                    <tr>
+                        <td style="color:#888;">Current (Raw Hex):</td>
+                        <td id="debug-current-hex" style="color:#00ff88;">--</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">Voltage (Raw Hex):</td>
+                        <td id="debug-voltage-hex" style="color:#00e5ff;">--</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">SOC (Raw Hex):</td>
+                        <td id="debug-soc-hex" style="color:#ffab00;">--</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">Balance Status:</td>
+                        <td id="debug-balance" style="color:#ff3d00; font-size:0.8em;">--</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">Balance Hex:</td>
+                        <td id="debug-balance-hex" style="color:#fff; font-family:monospace; font-size:0.8em;">--</td>
+                    </tr>
+                </table>
+                <button onclick="copyDebugInfo()" style="margin-top:10px; width:100%;">📋 Copy Debug Info</button>
+            </div>
+        </div>
+
+        <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+        <script>
+            const socket = io();
+
+            // Init Cell Grid
+            function initGrid() {
+                const grid = document.getElementById('cellGrid');
+                grid.innerHTML = '';
+                for (let i = 1; i <= 23; i++) {
+                    grid.innerHTML += `<div class="cell-box" id="cell-box-${i}">
+                    <div class="cell-id">#${i}</div>
+                    <div class="cell-val" id="cell-${i}">--</div>
+                </div>`;
+                }
+            }
+
+            initGrid();
+
+            socket.on('connect', () => {
+                console.log('Connected to server');
+            });
+
+            // CAN Sniffer handler
+            let snifferLines = [];
+            socket.on('can_sniffer', (data) => {
+                const log = document.getElementById('canSnifferLog');
+                const line = document.createElement('div');
+                line.style.color = '#00ff88';
+                line.style.marginBottom = '2px';
+                line.textContent = data.data;
+                log.appendChild(line);
+
+                snifferLines.push(data.data);
+                document.getElementById('sniffer-count').innerText = snifferLines.length;
+
+                // Auto-scroll
+                log.scrollTop = log.scrollHeight;
+
+                // Limit to 500 lines
+                if (log.children.length > 500) {
+                    log.removeChild(log.firstChild);
+                }
+            });
+
+            function clearSniffer() {
+                document.getElementById('canSnifferLog').innerHTML = '<div style="color:#666;">Cleared</div>';
+                snifferLines = [];
+                document.getElementById('sniffer-count').innerText = '0';
+            }
+
+            function copySniffer() {
+                const text = snifferLines.join('\n');
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('CAN data copied to clipboard!');
+                });
+            }
+
+            socket.on('connection_status', (data) => {
+                const connEl = document.getElementById('connection');
+                if (data.connected) {
+                    connEl.className = 'connected';
+                    connEl.innerText = '🟢 Connected';
+                } else {
+                    connEl.className = 'disconnected';
+                    connEl.innerText = '🔴 Disconnected';
+                }
+            });
+
+            // Recording System
+            let isRecording = false;
+            let recordedData = [];
+            let startTime = 0;
+
+            function startRecording() {
+                isRecording = true;
+                startTime = Date.now();
+                document.getElementById('btn-start').style.display = 'none';
+                document.getElementById('btn-stop').style.display = 'block';
+                document.getElementById('btn-export').disabled = true;
+                document.getElementById('rec-status').innerText = "Recording...";
+                document.getElementById('rec-status').style.color = "#ff3d00";
+            }
+
+            function stopRecording() {
+                isRecording = false;
+                document.getElementById('btn-start').style.display = 'block';
+                document.getElementById('btn-stop').style.display = 'none';
+                document.getElementById('btn-export').disabled = false;
+                document.getElementById('rec-status').innerText = "Stopped";
+                document.getElementById('rec-status').style.color = "#888";
+            }
+
+            function clearData() {
+                recordedData = [];
+                updateRecStats();
+                document.getElementById('btn-export').disabled = true;
+            }
+
+            function updateRecStats() {
+                document.getElementById('rec-count').innerText = recordedData.length;
+                document.getElementById('rec-size').innerText = (JSON.stringify(recordedData).length / 1024).toFixed(1);
+            }
+
+            function exportData() {
+                if (recordedData.length === 0) return;
+
+                let txt = "# Votol CAN Bus Analysis Export\n";
+                txt += "# Generated: " + new Date().toISOString() + "\n";
+                txt += "# Records: " + recordedData.length + "\n\n";
+
+                txt += "=== KNOWN CAN IDs ===\n";
+                txt += "0x0A010810 = Mode, RPM, Temps\n";
+                txt += "0x0A6D0D09 = Voltage\n";
+                txt += "0x0A6E0D09 = SOC\n";
+                txt += "0x0A6F0D09 = Current\n\n";
+
+                txt += "=== RAW CAN DATA ===\n";
+                txt += "Format: TIME | CAN_ID | LEN | BYTES\n\n";
+
+                const canGroups = {};
+                recordedData.forEach(row => {
+                    if (row.rawCAN) {
+                        row.rawCAN.forEach(can => {
+                            if (!canGroups[can.id]) canGroups[can.id] = [];
+                            canGroups[can.id].push({ t: row.time, l: can.len, d: can.data });
+                        });
+                    }
+                });
+
+                Object.keys(canGroups).sort().forEach(id => {
+                    const msgs = canGroups[id];
+                    txt += `\n--- ${id} (${msgs.length} msgs) ---\n`;
+                    const samples = [msgs[0], msgs[Math.floor(msgs.length / 2)], msgs[msgs.length - 1]];
+                    samples.forEach((m, i) => {
+                        const lbl = i === 0 ? "FIRST" : i === 1 ? "MID" : "LAST";
+                        txt += `\n--- CAN ID: ${id} (${msgs.length} messages) ---\n`;
+
+                        if (msgs.length > 3) {
+                            txt += `FIRST: ${msgs[0].data}\n`;
+                            txt += `MID:   ${msgs[Math.floor(msgs.length / 2)].data}\n`;
+                            txt += `LAST:  ${msgs[msgs.length - 1].data}\n`;
+
+                            // Detect changes
+                            const first = msgs[0].data.split(' ');
+                            const last = msgs[msgs.length - 1].data.split(' ');
+                            let changes = "CHANGES: ";
+                            let hasChange = false;
+                            for (let i = 0; i < Math.min(first.length, last.length); i++) {
+                                if (first[i] !== last[i]) {
+                                    hasChange = true;
+                                    changes += `Byte[${i}]: ${first[i]} → ${last[i]} | `;
+                                }
+                            }
+                            txt += hasChange ? changes + "\n" : "STATIC: No changes\n";
+                        } else {
+                            msgs.forEach((m, i) => txt += `${i + 1}: ${m.data}\n`);
+                        }
+                    });
+
+                    txt += "\n\n=== AI ANALYSIS HINTS ===\n";
+                    txt += "Look for CAN IDs where:\n";
+                    txt += "1. Values INCREASE over time → likely odometer/trip counter\n";
+                    txt += "2. Values change with motor state → speed/throttle related\n";
+                    txt += "3. Unknown IDs not in KNOWN list above\n";
+                    txt += "4. Multi-byte values usually Big Endian format\n\n";
+                    txt += "To find odometer: Look for bytes that increment consistently\n";
+                    txt += "Example: If you traveled 1km, odometer should increase by ~1000 (if in meters)\n";
+
+                    const blob = new Blob([txt], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `votol_can_analysis_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                });
+            }
+
+            socket.on('dashboard_data', (data) => {
+                if (isRecording) {
+                    // Add timestamp relative to start
+                    const record = {
+                        ...data,
+                        time: Date.now(),
+                        power: (data.power || (data.volts * data.amps)).toFixed(0)
+                    };
+                    recordedData.push(record);
+                    updateRecStats();
+                }
+                updateDashboard(data);
+            });
+
+            // Copy debug info function
+            function copyDebugInfo() {
+                const debugText = `Current Hex: ${document.getElementById('debug-current-hex').innerText}\nVoltage Hex: ${document.getElementById('debug-voltage-hex').innerText}\nSOC Hex: ${document.getElementById('debug-soc-hex').innerText}`;
+                navigator.clipboard.writeText(debugText).then(() => {
+                    alert('Debug info copied to clipboard!');
+                });
+            }
+
+            function updateDashboard(data) {
+                // Update connection status
+                const connEl = document.getElementById('connection');
+                if (data.connType === 'BLE') {
+                    connEl.innerText = '🔵 Bluetooth';
+                    connEl.style.color = '#00e5ff'; // Cyan for BLE
+                    connEl.className = 'connected';
+                } else if (data.connType === 'USB') {
+                    connEl.innerText = '🔌 USB';
+                    connEl.style.color = '#00ff88'; // Green for USB
+                    connEl.className = 'connected';
+                }
+                // Else keep existing status (don't overwrite if undefined)
+
+                // Temperatures
+                updateTemp('val-ctrl', 'card-ctrl', data.temps.ctrl);
+                updateTemp('val-motor', 'card-motor', data.temps.motor);
+                updateTemp('val-batt', 'card-batt', data.temps.batt);
+
+                // Volt, Amps, Power (BMS Method)
+                document.getElementById('val-volt').innerText = data.volts.toFixed(1);
+
+                const ampEl = document.getElementById('val-amps');
+                ampEl.innerText = data.amps.toFixed(1);
+                if (data.amps < 0) ampEl.style.color = '#00ff88';  // Regen
+                else if (data.amps > 0.5) ampEl.style.color = '#ffab00';  // Discharge
+                else ampEl.style.color = '#888';  // Idle
+
+                const powerVal = Math.round(data.power || (data.volts * data.amps));
+                document.getElementById('val-power').innerText = powerVal;
+                document.getElementById('val-power-sub').innerText = powerVal;
+
+                // SOC
+                const socEl = document.getElementById('val-soc');
+                const socCard = document.getElementById('card-soc');
+                socEl.innerText = data.soc;
+                if (data.soc > 60) { socCard.style.borderColor = '#00ff88'; socEl.style.color = '#00ff88'; }
+                else if (data.soc > 30) { socCard.style.borderColor = '#ffab00'; socEl.style.color = '#ffab00'; }
+                else { socCard.style.borderColor = '#ff3d00'; socEl.style.color = '#ff3d00'; }
+
+                // Speed & RPM
+                document.getElementById('val-speed').innerText = Math.round(data.speed);
+                document.getElementById('val-rpm').innerText = data.rpm;
+
+                // NEW: Cell Temperatures
+                if (data.cellTemps) {
+                    for (let i = 0; i < 5; i++) {
+                        const el = document.getElementById(`cell-temp-${i}`);
+                        if (el) el.innerText = data.cellTemps[i] || '--';
+                    }
+                }
+
+                // NEW: BMS Info
+                if (data.bmsInfo) {
+                    document.getElementById('bms-serial').innerText = data.bmsInfo.serial || '--';
+                    document.getElementById('bms-hw').innerText = data.bmsInfo.hwVer || '--';
+                    document.getElementById('bms-fw').innerText = data.bmsInfo.fwVer || '--';
+                }
+
+                // NEW: Odometer & Trip - DISABLED (UI elements not created yet)
+                // FIXME: Uncomment when odometer/trip HTML elements are added
+                /*
+                if (Number.isFinite(data.odometer)) {
+                    const odoVal = data.odometer / 1.0; // Assuming raw is km if we ever find it
+                    document.getElementById('odometer').innerText = odoVal.toFixed(1) + " km";
+     
+                    // Trip update
+                    if (window.startOdo === 0 || window.startOdo === undefined) {
+                        window.startOdo = odoVal;
+                        console.log("Trip Start Odo set to:", window.startOdo);
+                    }
+                    const trip = odoVal - window.startOdo;
+                    document.getElementById('trip-dist').innerText = trip.toFixed(1);
+                } else {
+                    document.getElementById('odometer').innerText = "---";
+                }
+                */
+
+                // Mode
+                const modeEl = document.getElementById('val-mode');
+                const cardMode = document.getElementById('card-mode');
+                modeEl.innerText = data.mode;
+
+                cardMode.className = "card status active";
+                if (data.mode === 'PARK') {
+                    cardMode.className = "card status park";
+                    cardMode.style.borderColor = "#333";
+                } else if (data.mode === 'STAND') {
+                    cardMode.className = "card status park";
+                    cardMode.style.borderColor = "#333";
+                } else if (data.mode === 'REVERSE') {
+                    cardMode.className = "card status reverse";
+                    cardMode.style.borderColor = "#ff3d00";
+                } else if (data.mode === 'SPORT') {
+                    cardMode.className = "card status sport";
+                    cardMode.style.borderColor = "#ffab00";
+                } else if (data.mode === 'CUT OFF') { // Brake
+                    cardMode.style.borderColor = "#ff3d00";
+                    cardMode.style.color = "#ff3d00";
+                }
+
+                // Update debug raw values
+                if (data.rawHex) {
+                    document.getElementById('debug-current-hex').innerText = data.rawHex.current || '--';
+                    document.getElementById('debug-voltage-hex').innerText = data.rawHex.voltage || '--';
+                    document.getElementById('debug-soc-hex').innerText = data.rawHex.soc || '--';
+                }
+
+
+
+                // Cells
+                if (data.cells) {
+                    let min = 9999, max = 0;
+                    data.cells.forEach((mv, i) => {
+                        const v = (mv / 1000).toFixed(3);
+                        const el = document.getElementById(`cell-${i + 1}`);
+                        const box = document.getElementById(`cell-box-${i + 1}`);
+                        if (el) {
+                            el.innerText = v;
+                            if (mv < 3700) box.style.borderColor = '#ff3d00';
+                            else if (mv > 4100) box.style.borderColor = '#00e5ff';
+                            else box.style.borderColor = '#444';
+                        }
+                        if (mv > 0 && mv < min) min = mv;
+                        if (mv > max) max = mv;
+                    });
+
+                    // Delta
+                    if (min < 9000) {
+                        const delta = max - min;
+                        const deltaEl = document.getElementById('bms-delta');
+                        deltaEl.innerText = delta;
+
+                        if (delta < 20) deltaEl.style.color = '#00ff88';
+                        else if (delta < 50) deltaEl.style.color = '#ffab00';
+                        else deltaEl.style.color = '#ff3d00';
+                    }
+                }
+
+                document.getElementById('can-rate').innerText = data.canRate;
+
+                if (data.debug) {
+                    document.getElementById('debug-current-hex').innerText = data.debug.currentHex || '--';
+                    document.getElementById('debug-voltage-hex').innerText = data.debug.voltageHex || '--';
+                    document.getElementById('debug-soc-hex').innerText = data.debug.socHex || '--';
+                    document.getElementById('debug-balance-hex').innerText = data.debug.balanceHex || '-';
+                }
+
+                if (data.balance) {
+                    document.getElementById('debug-balance').innerText = `M:${data.balance.mode} S:${data.balance.status} Cells:${data.balance.cells ? data.balance.cells.filter(c => c).length : 0}`;
+                    // Update visible raw hex in BMS section
+                    if (data.debug && data.debug.balanceHex) {
+                        document.getElementById('debug-balance-hex-visible').innerText = data.debug.balanceHex;
+                    }
+                }
+
+                // UPDATE: Battery Health (corrected field names)
+                if (data.health) {
+                    const sohEl = document.getElementById('val-soh');
+                    sohEl.innerText = data.health.soh;
+                    // Color based on SOH
+                    if (data.health.soh >= 80) sohEl.style.color = '#00ff88';
+                    else if (data.health.soh >= 60) sohEl.style.color = '#ffab00';
+                    else sohEl.style.color = '#ff3d00';
+
+                    document.getElementById('val-cycles').innerText = data.health.cycles;
+
+                    // Use fullCap not fullCapacity
+                    if (data.health.fullCap !== undefined) {
+                        document.getElementById('val-capacity').innerText = data.health.fullCap.toFixed(1);
+                    }
+                }
+
+                // UPDATE: Cell Voltage Statistics (from cellVoltStats)
+                if (data.cellVoltStats) {
+                    const deltaBMSEl = document.getElementById('val-delta-bms');
+                    deltaBMSEl.innerText = data.cellVoltStats.delta;
+                    // Color based on delta
+                    if (data.cellVoltStats.delta < 50) deltaBMSEl.style.color = '#00ff88';
+                    else if (data.cellVoltStats.delta < 100) deltaBMSEl.style.color = '#ffab00';
+                    else deltaBMSEl.style.color = '#ff3d00';
+
+                    // Update voltage statistics elements
+                    document.getElementById('val-highest-volt').innerText = data.cellVoltStats.highest;
+                    document.getElementById('val-highest-cell').innerText = data.cellVoltStats.highestCell;
+                    document.getElementById('val-lowest-volt').innerText = data.cellVoltStats.lowest;
+                    document.getElementById('val-lowest-cell').innerText = data.cellVoltStats.lowestCell;
+                    document.getElementById('val-avg-volt').innerText = data.cellVoltStats.average;
+                    document.getElementById('val-avg-volt').innerText = data.cellVoltStats.average;
+                }
+
+                // Balance Status
+                if (data.balance) {
+                    const modeStrs = ["Auto", "Mode 1"];
+                    const statusStrs = ["None", "Charging", "Discharging", "Standstill"];
+
+                    document.getElementById('val-bal-mode').innerText = modeStrs[data.balance.mode] || "Unk";
+                    document.getElementById('val-bal-status').innerText = statusStrs[data.balance.status] || "Unk";
+
+                    // Update cell grid balancing state
+                    if (data.balance.cells) {
+                        data.balance.cells.forEach((isBalancing, i) => {
+                            const box = document.getElementById(`cell-box-${i + 1}`);
+                            if (box) {
+                                if (isBalancing) box.classList.add('balancing');
+                                else box.classList.remove('balancing');
+                            }
+                        });
+                    }
+                }
+
+                // Update SOC Calibration Panel
+                updateSOCDisplay(data);
+            }
+
+            function resetTrip() {
+                // Reset start odometer to current dashboard value
+                const currentOdoText = document.getElementById('odometer').innerText
+                const currentOdo = parseFloat(currentOdoText);
+                if (!isNaN(currentOdo) && currentOdo > 0) {
+                    window.startOdo = currentOdo;
+                    document.getElementById('trip-dist').innerText = "0.0";
+                    alert("Trip Reset! Start point: " + currentOdo + " km");
+                } else {
+                    alert("Wait for valid Odometer data first!");
+                }
+            }
+
+            // Copy debug info function
+            function copyDebugInfo() {
+                const debugText = `Current Hex: ${document.getElementById('debug-current-hex').innerText}\nVoltage Hex: ${document.getElementById('debug-voltage-hex').innerText}\nSOC Hex: ${document.getElementById('debug-soc-hex').innerText}`;
+                navigator.clipboard.writeText(debugText).then(() => {
+                    alert('Debug info copied to clipboard!');
+                });
+            }
+
+            function updateTemp(idVal, idCard, val) {
+                const el = document.getElementById(idVal);
+                el.innerText = val;
+                const card = document.getElementById(idCard);
+                if (val >= 80) card.classList.add('hot');
+                else card.classList.remove('hot');
+            }
+
+
+            // ===== SOC CALIBRATION TOOL =====
+            let socDataLog = JSON.parse(localStorage.getItem('socCalibrationData') || '[]');
+            let currentSOCRaw = 0;
+
+            function updateSOCDisplay(data) {
+                if (data.debug && data.debug.socHex) {
+                    // Parse hex to decimal
+                    const hexStr = data.debug.socHex.replace('0x', '');
+                    currentSOCRaw = parseInt(hexStr, 16);
+
+                    document.getElementById('soc-raw-dec').innerText = currentSOCRaw;
+                    document.getElementById('soc-raw-hex').innerText = data.debug.socHex;
+                    document.getElementById('soc-calculated').innerText = data.soc + '%';
+                }
+            }
+
+            function addSOCDataPoint() {
+                const speedoInput = document.getElementById('speedometer-input');
+                const speedoValue = parseInt(speedoInput.value);
+
+                if (!speedoValue || speedoValue < 0 || speedoValue > 100) {
+                    alert('Please enter a valid speedometer reading (0-100%)');
+                    return;
+                }
+
+                if (currentSOCRaw === 0) {
+                    alert('Waiting for SOC data from ESP32...');
+                    return;
+                }
+
+                const dataPoint = {
+                    timestamp: new Date().toISOString(),
+                    rawDecimal: currentSOCRaw,
+                    rawHex: '0x' + currentSOCRaw.toString(16).toUpperCase(),
+                    calculated: Math.floor(currentSOCRaw / 10),
+                    speedometer: speedoValue
+                };
+
+                socDataLog.push(dataPoint);
+                localStorage.setItem('socCalibrationData', JSON.stringify(socDataLog));
+
+                updateSOCLog();
+                speedoInput.value = '';
+                speedoInput.focus();
+            }
+
+            function updateSOCLog() {
+                const logDiv = document.getElementById('soc-log');
+                const countSpan = document.getElementById('soc-count');
+                const exportBtn = document.getElementById('btn-export-soc');
+
+                countSpan.innerText = socDataLog.length;
+
+                if (socDataLog.length === 0) {
+                    logDiv.innerHTML = '<div style="color:#666;">No data collected yet. Enter speedometer reading and click "Add to Log".</div>';
+                    exportBtn.disabled = true;
+                    return;
+                }
+
+                exportBtn.disabled = false;
+
+                let html = '<table style="width:100%; border-collapse:collapse;">';
+                html += '<tr style="border-bottom:1px solid #333; color:#888;">';
+                html += '<th style="padding:5px; text-align:left;">#</th>';
+                html += '<th style="padding:5px; text-align:right;">Raw</th>';
+                html += '<th style="padding:5px; text-align:right;">Calc %</th>';
+                html += '<th style="padding:5px; text-align:right;">Speedo %</th>';
+                html += '<th style="padding:5px; text-align:right;">Diff</th>';
+                html += '<th style="padding:5px;"></th>';
+                html += '</tr>';
+
+                socDataLog.forEach((point, index) => {
+                    const diff = point.speedometer - point.calculated;
+                    const diffColor = diff === 0 ? '#00ff88' : (Math.abs(diff) <= 2 ? '#ffab00' : '#ff3d00');
+
+                    html += `<tr style="border-bottom:1px solid #222;">`;
+                    html += `<td style="padding:5px; color:#666;">${index + 1}</td>`;
+                    html += `<td style="padding:5px; text-align:right; color:#00ff88;">${point.rawDecimal}</td>`;
+                    html += `<td style="padding:5px; text-align:right; color:#00e5ff;">${point.calculated}%</td>`;
+                    html += `<td style="padding:5px; text-align:right; color:#ffab00; font-weight:bold;">${point.speedometer}%</td>`;
+                    html += `<td style="padding:5px; text-align:right; color:${diffColor};">${diff > 0 ? '+' : ''}${diff}</td>`;
+                    html += `<td style="padding:5px;"><button onclick="deleteSOCPoint(${index})" style="background:#ff3d00; color:#fff; border:none; padding:2px 8px; border-radius:3px; cursor:pointer; font-size:0.8em;">🗑</button></td>`;
+                    html += `</tr>`;
+                });
+
+                html += '</table>';
+                logDiv.innerHTML = html;
+            }
+
+            function deleteSOCPoint(index) {
+                if (confirm('Delete this data point?')) {
+                    socDataLog.splice(index, 1);
+                    localStorage.setItem('socCalibrationData', JSON.stringify(socDataLog));
+                    updateSOCLog();
+                }
+            }
+
+            function clearSOCLog() {
+                if (confirm('Clear all SOC calibration data?')) {
+                    socDataLog = [];
+                    localStorage.removeItem('socCalibrationData');
+                    updateSOCLog();
+                }
+            }
+
+            function exportSOCData() {
+                if (socDataLog.length === 0) return;
+
+                let csv = 'Timestamp,Raw Decimal,Raw Hex,Calculated %,Speedometer %,Difference\n';
+                socDataLog.forEach(point => {
+                    const diff = point.speedometer - point.calculated;
+                    csv += `${point.timestamp},${point.rawDecimal},${point.rawHex},${point.calculated},${point.speedometer},${diff}\n`;
+                });
+
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `soc_calibration_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                alert(`Exported ${socDataLog.length} data points!`);
+            }
+
+            // Initialize SOC log on page load
+            updateSOCLog();
+
+        </script>
+
+        <!-- Credits Footer -->
+        <div
+            style="margin-top: 40px; padding: 20px; background: linear-gradient(135deg, #0a0a0a, #1a1a2e); border: 1px solid #333; border-radius: 10px; text-align: center;">
+            <div style="margin-bottom: 15px;">
+                <span style="color: #00ff88; font-size: 1.2em; font-weight: bold;">⚡ Votol BLE Dashboard</span>
+            </div>
+            <div style="color: #888; font-size: 0.9em; margin-bottom: 10px;">
+                Created by <a href="https://zekri.id" target="_blank"
+                    style="color: #00e5ff; text-decoration: none; font-weight: bold;">Zekri R (ZEKRI.ID)</a>
+            </div>
+            <div style="color: #666; font-size: 0.85em; margin-bottom: 15px;">
+                Based on <a href="https://github.com/yudhaime/displaypolytronfoxrs" target="_blank"
+                    style="color: #ffab00; text-decoration: none;">displaypolytronfoxrs</a> by yudhaime
+            </div>
+            <div
+                style="background: #1a0000; border: 1px solid #ff3d00; border-radius: 5px; padding: 15px; margin-top: 15px;">
+                <div style="color: #ff3d00; font-weight: bold; margin-bottom: 8px;">⚠️ DISCLAIMER / PERINGATAN</div>
+                <div style="color: #888; font-size: 0.8em; line-height: 1.5;">
+                    <strong>EN:</strong> Use at your own risk. Author is NOT responsible for any damage to your vehicle,
+                    controller, or battery.<br>
+                    <strong>ID:</strong> Gunakan dengan risiko Anda sendiri. Penulis TIDAK bertanggung jawab atas
+                    kerusakan pada kendaraan, controller, atau baterai Anda.
+                </div>
+            </div>
+        </div>
+
+</body>
+
+</html>

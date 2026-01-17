@@ -1,0 +1,5 @@
+Flask==3.0.0
+flask-socketio==5.3.5
+bleak==0.22.3
+pyserial==3.51.0
+python-socketio==5.11.0
