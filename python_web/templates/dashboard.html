@@ -489,17 +489,34 @@
         <div style="margin-top:20px; border:1px solid #333; padding:15px; border-radius:10px; background:#111;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                 <h3>🔍 CAN Sniffer (Live USB Serial)</h3>
-                <button onclick="clearSniffer()"
-                    style="background:#ff3d00; color:#fff; border:none; padding:5px 15px; border-radius:5px; cursor:pointer;">Clear</button>
+                <div style="display:flex; gap:10px;">
+                    <button id="btn-pause-sniffer" onclick="toggleSnifferPause()"
+                        style="background:#ffab00; color:#000; border:none; padding:5px 15px; border-radius:5px; cursor:pointer; font-weight:bold;">
+                        ⏸ Pause
+                    </button>
+                    <button onclick="clearSniffer()"
+                        style="background:#ff3d00; color:#fff; border:none; padding:5px 15px; border-radius:5px; cursor:pointer;">
+                        🗑 Clear
+                    </button>
+                </div>
             </div>
             <div id="canSnifferLog"
                 style="font-family:monospace; font-size:0.85em; max-height:300px; overflow-y:auto; background:#000; padding:10px; border-radius:5px;">
                 <div style="color:#666;">Waiting for CAN data from USB Serial...</div>
             </div>
-            <div style="margin-top:10px; color:#666; font-size:0.9em;">
-                Lines: <span id="sniffer-count">0</span> | <button onclick="copySniffer()" style="padding:5px 10px;">📋
-                    Copy
-                    All</button>
+            <div
+                style="margin-top:10px; color:#666; font-size:0.9em; display:flex; justify-content:space-between; align-items:center;">
+                <div>Lines: <span id="sniffer-count">0</span></div>
+                <div style="display:flex; gap:10px;">
+                    <button onclick="copySniffer(100)"
+                        style="padding:5px 10px; cursor:pointer; background:#222; color:#fff; border:1px solid #444; border-radius:4px;">
+                        📋 Copy Last 100
+                    </button>
+                    <button onclick="copySniffer(0)"
+                        style="padding:5px 10px; cursor:pointer; background:#222; color:#fff; border:1px solid #444; border-radius:4px;">
+                        📋 Copy All
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -531,6 +548,20 @@
                         <td style="color:#888;">Balance Hex:</td>
                         <td id="debug-balance-hex" style="color:#fff; font-family:monospace; font-size:0.8em;">--</td>
                     </tr>
+                    <!-- NEW DEBUG STATS -->
+                    <tr>
+                        <td style="color:#888; border-top:1px solid #333; padding-top:5px;">Update Rate:</td>
+                        <td style="border-top:1px solid #333; padding-top:5px;"><span id="debug-hz"
+                                style="font-weight:bold;">--</span> Hz</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">Throughput:</td>
+                        <td><span id="debug-kbps" style="color:#ccc;">--</span> KB/s</td>
+                    </tr>
+                    <tr>
+                        <td style="color:#888;">Burst Count:</td>
+                        <td><span id="debug-burst">0</span></td>
+                    </tr>
                 </table>
                 <button onclick="copyDebugInfo()" style="margin-top:10px; width:100%;">📋 Copy Debug Info</button>
             </div>
@@ -560,7 +591,23 @@
 
             // CAN Sniffer handler
             let snifferLines = [];
+            let isSnifferPaused = false;
+
+            function toggleSnifferPause() {
+                isSnifferPaused = !isSnifferPaused;
+                const btn = document.getElementById('btn-pause-sniffer');
+                if (isSnifferPaused) {
+                    btn.innerHTML = "▶ Resume";
+                    btn.style.background = "#00ff88"; // Green
+                } else {
+                    btn.innerHTML = "⏸ Pause";
+                    btn.style.background = "#ffab00"; // Orange
+                }
+            }
+
             socket.on('can_sniffer', (data) => {
+                if (isSnifferPaused) return;
+
                 const log = document.getElementById('canSnifferLog');
                 const line = document.createElement('div');
                 line.style.color = '#00ff88';
@@ -574,9 +621,11 @@
                 // Auto-scroll
                 log.scrollTop = log.scrollHeight;
 
-                // Limit to 500 lines
+                // Limit to 500 lines for visual performance, but keep more in buffer if needed? 
+                // Currently keeping sync between visual and buffer.
                 if (log.children.length > 500) {
                     log.removeChild(log.firstChild);
+                    snifferLines.shift(); // Keep underlying array in sync
                 }
             });
 
@@ -586,10 +635,23 @@
                 document.getElementById('sniffer-count').innerText = '0';
             }
 
-            function copySniffer() {
-                const text = snifferLines.join('\n');
+            function copySniffer(count) {
+                let linesToCopy = snifferLines;
+                if (count > 0 && count < snifferLines.length) {
+                    linesToCopy = snifferLines.slice(-count);
+                }
+
+                if (linesToCopy.length === 0) {
+                    alert('No data to copy!');
+                    return;
+                }
+
+                const text = linesToCopy.join('\n');
                 navigator.clipboard.writeText(text).then(() => {
-                    alert('CAN data copied to clipboard!');
+                    alert(`Copied ${linesToCopy.length} lines to clipboard!`);
+                }).catch(err => {
+                    console.error('Failed to copy: ', err);
+                    alert('Failed to copy. See console.');
                 });
             }
 
@@ -795,6 +857,22 @@
                     document.getElementById('bms-serial').innerText = data.bmsInfo.serial || '--';
                     document.getElementById('bms-hw').innerText = data.bmsInfo.hwVer || '--';
                     document.getElementById('bms-fw').innerText = data.bmsInfo.fwVer || '--';
+                }
+
+                // DEBUG STATS UPDATE
+                if (data.debug_hz !== undefined) {
+                    const hzEl = document.getElementById('debug-hz');
+                    hzEl.innerText = data.debug_hz;
+                    if (data.debug_hz > 8.0) hzEl.style.color = '#ff3d00'; // Red if too fast
+                    else if (data.debug_hz > 4.0) hzEl.style.color = '#00ff88'; // Green if good
+                    else hzEl.style.color = '#ffab00'; // Yellow if slow/initializing
+
+                    document.getElementById('debug-kbps').innerText = data.debug_kbps;
+
+                    const burstEl = document.getElementById('debug-burst');
+                    burstEl.innerText = data.debug_burst;
+                    if (data.debug_burst > 2) burstEl.style.color = '#ff3d00';
+                    else burstEl.style.color = '#888';
                 }
 
                 // NEW: Odometer & Trip - DISABLED (UI elements not created yet)

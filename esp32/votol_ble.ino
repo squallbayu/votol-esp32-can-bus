@@ -66,7 +66,7 @@ static const int BLE_PUMP_MAX_CHUNKS = 8;        // max notify calls per loop
 
 BLEServer* pServer = nullptr;
 BLECharacteristic* pCharacteristic = nullptr;
-bool deviceConnected = false;
+volatile bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -154,6 +154,13 @@ uint16_t rawVoltageHex = 0;
 uint16_t rawSOCHex = 0;
 String rawBalanceHex = "00 00 00 00 00 00";
 
+// Charger data
+float valChargerVoltage = 0.0f;
+float valChargerCurrent = 0.0f;
+uint8_t valChargerStatus = 0;
+bool chargerConnected = false;
+unsigned long lastChargerMsg = 0;
+
 uint32_t canMessagesPerSec = 0;
 uint32_t canMsgCount = 0;
 uint32_t lastSecond = 0;
@@ -164,7 +171,8 @@ bool ledState = false;
 unsigned long heartbeatCounter = 0;
 
 // === BLE TX state ===
-static String bleTxBuf;
+static char bleTxBuf[2200];  // Static buffer - no heap fragmentation
+static uint16_t bleTxLen = 0;
 static uint16_t bleTxOffset = 0;
 static bool bleTxInProgress = false;
 static uint32_t lastDataSend = 0;
@@ -300,7 +308,7 @@ void handleCANMessage(twai_message_t &msg) {
   }
 
   // Cell volt blocks 0x0E64..0x0E69
-  if ((id & 0xFFFF0FFF) == 0x0E600D09) {
+  if ((id & 0xFFF0FFFF) == 0x0E600D09) {
     int baseIndex = -1;
     switch (id) {
       case 0x0E640D09: baseIndex = 0;  break;
@@ -321,14 +329,28 @@ void handleCANMessage(twai_message_t &msg) {
     }
     return;
   }
+
+  // Charger messages (0x1810D0F3 or 0x1811D0F3)
+  if ((id == 0x1810D0F3 || id == 0x1811D0F3) && msg.data_length_code >= 5) {
+    // Typical charger protocol: Voltage (2 bytes), Current (2 bytes), Status (1 byte)
+    uint16_t vRaw = (uint16_t)((msg.data[0] << 8) | msg.data[1]);
+    valChargerVoltage = vRaw * 0.1f;
+
+    uint16_t iRaw = (uint16_t)((msg.data[2] << 8) | msg.data[3]);
+    valChargerCurrent = iRaw * 0.1f;
+
+    valChargerStatus = msg.data[4];
+    chargerConnected = true;
+    lastChargerMsg = millis();
+    return;
+  }
 }
 
 // =============================================
 // BLE DATA SEND (JSON FORMAT MUST STAY SAME)
+// Using snprintf for better memory efficiency
 // =============================================
-static void buildJsonInto(String &json) {
-  json.reserve(2200);
-
+static void buildJsonInto() {
   uint16_t minCell = 9999, maxCell = 0;
   for (int i = 0; i < 23; i++) {
     if (valCells[i] > 0 && valCells[i] < minCell) minCell = valCells[i];
@@ -336,85 +358,69 @@ static void buildJsonInto(String &json) {
   }
   int cellDelta = (int)maxCell - (int)minCell;
 
-  // EXACT JSON format (same keys/structure as your original)
-  json = "{";
-  json += "\"rpm\":" + String(valRPM) + ",";
-  json += "\"speed\":" + String(valSpeed) + ",";
-  json += "\"mode\":\"" + strMode + "\",";
-  json += "\"volts\":" + String(valVolts, 1) + ",";
-  json += "\"amps\":" + String(valAmpere, 1) + ",";
-  json += "\"power\":" + String(valPower, 0) + ",";
-  json += "\"soc\":" + String(valSOC) + ",";
-  json += "\"temps\":{";
-  json += "\"ctrl\":" + String(valCtrlTemp) + ",";
-  json += "\"motor\":" + String(valMotorTemp) + ",";
-  json += "\"batt\":" + String(valBattTemp);
-  json += "},";
-  json += "\"cells\":[";
-  for (int i = 0; i < 23; i++) {
-    json += String(valCells[i]);
-    if (i < 22) json += ",";
-  }
-  json += "],";
-  json += "\"cellDelta\":" + String(cellDelta) + ",";
-  json += "\"canRate\":" + String(canMessagesPerSec) + ",";
-
-  json += "\"odometer\":" + String(valOdometer) + ",";
-
-  json += "\"health\":{";
-  json += "\"soh\":" + String(valSOH) + ",";
-  json += "\"cycles\":" + String(valCycleCount) + ",";
-  json += "\"remainCap\":" + String(valRemainingCapacity, 1) + ",";
-  json += "\"fullCap\":" + String(valFullCapacity, 1);
-  json += "},";
-
-  json += "\"cellVoltStats\":{";
-  json += "\"highest\":" + String(valHighestCellVolt) + ",";
-  json += "\"highestCell\":" + String(valHighestCellNum) + ",";
-  json += "\"lowest\":" + String(valLowestCellVolt) + ",";
-  json += "\"lowestCell\":" + String(valLowestCellNum) + ",";
-  json += "\"average\":" + String(valAvgCellVolt) + ",";
-  json += "\"delta\":" + String((int)valHighestCellVolt - (int)valLowestCellVolt);
-  json += "},";
-
-  json += "\"tempStats\":{";
-  json += "\"max\":" + String(valMaxTemp) + ",";
-  json += "\"maxCell\":" + String(valMaxTempCell) + ",";
-  json += "\"min\":" + String(valMinTemp) + ",";
-  json += "\"minCell\":" + String(valMinTempCell);
-  json += "},";
-
-  json += "\"balance\":{";
-  json += "\"mode\":" + String(valBalanceMode) + ",";
-  json += "\"status\":" + String(valBalanceStatus) + ",";
-  json += "\"cells\":[";
+  // Build balance cells array string
+  char balanceCells[120];
+  int bpos = 0;
   for (int i = 0; i < 23; i++) {
     int byteIndex = i / 8;
     int bitIndex = i % 8;
     bool isBalancing = (valBalanceBits[byteIndex] & (1 << bitIndex)) != 0;
-    json += isBalancing ? "true" : "false";
-    if (i < 22) json += ",";
+    bpos += snprintf(balanceCells + bpos, sizeof(balanceCells) - bpos, 
+                     "%s%s", isBalancing ? "true" : "false", (i < 22) ? "," : "");
   }
-  json += "]";
-  json += "},";
 
-  json += "\"heartbeat\":" + String(heartbeatCounter++) + ",";
+  // Build cells array string
+  char cellsStr[180];
+  int cpos = 0;
+  for (int i = 0; i < 23; i++) {
+    cpos += snprintf(cellsStr + cpos, sizeof(cellsStr) - cpos, 
+                     "%u%s", valCells[i], (i < 22) ? "," : "");
+  }
 
-  json += "\"debug\":{";
-  json += "\"currentHex\":\"0x" + String(rawCurrentHex, HEX) + "\",";
-  json += "\"voltageHex\":\"0x" + String(rawVoltageHex, HEX) + "\",";
-  json += "\"socHex\":\"0x" + String(rawSOCHex, HEX) + "\",";
-  json += "\"balanceHex\":\"" + rawBalanceHex + "\"";
-  json += "}";
-
-  json += "}\n";
+  // Build complete JSON - EXACT same format as before
+  bleTxLen = snprintf(bleTxBuf, sizeof(bleTxBuf),
+    "{\"rpm\":%d,"
+    "\"speed\":%d,"
+    "\"mode\":\"%s\","
+    "\"volts\":%.1f,"
+    "\"amps\":%.1f,"
+    "\"power\":%.0f,"
+    "\"soc\":%d,"
+    "\"temps\":{\"ctrl\":%d,\"motor\":%d,\"batt\":%d},"
+    "\"cells\":[%s],"
+    "\"cellDelta\":%d,"
+    "\"canRate\":%lu,"
+    "\"odometer\":%lu,"
+    "\"health\":{\"soh\":%d,\"cycles\":%u,\"remainCap\":%.1f,\"fullCap\":%.1f},"
+    "\"cellVoltStats\":{\"highest\":%u,\"highestCell\":%u,\"lowest\":%u,\"lowestCell\":%u,\"average\":%u,\"delta\":%d},"
+    "\"tempStats\":{\"max\":%u,\"maxCell\":%u,\"min\":%u,\"minCell\":%u},"
+    "\"balance\":{\"mode\":%u,\"status\":%u,\"cells\":[%s]},"
+    "\"charger\":{\"connected\":%s,\"voltage\":%.1f,\"current\":%.1f,\"status\":%u},"
+    "\"heartbeat\":%lu,"
+    "\"debug\":{\"currentHex\":\"0x%X\",\"voltageHex\":\"0x%X\",\"socHex\":\"0x%X\",\"balanceHex\":\"%s\"}"
+    "}\n",
+    valRPM, valSpeed, strMode.c_str(),
+    valVolts, valAmpere, valPower, valSOC,
+    valCtrlTemp, valMotorTemp, valBattTemp,
+    cellsStr, cellDelta,
+    (unsigned long)canMessagesPerSec,
+    (unsigned long)valOdometer,
+    valSOH, valCycleCount, valRemainingCapacity, valFullCapacity,
+    valHighestCellVolt, valHighestCellNum, valLowestCellVolt, valLowestCellNum, valAvgCellVolt, (int)valHighestCellVolt - (int)valLowestCellVolt,
+    valMaxTemp, valMaxTempCell, valMinTemp, valMinTempCell,
+    valBalanceMode, valBalanceStatus, balanceCells,
+    (millis() - lastChargerMsg < 5000 && chargerConnected) ? "true" : "false",
+    valChargerVoltage, valChargerCurrent, valChargerStatus,
+    (unsigned long)heartbeatCounter++,
+    rawCurrentHex, rawVoltageHex, rawSOCHex, rawBalanceHex.c_str()
+  );
 }
 
 static void startBleTxIfIdle() {
   if (!deviceConnected) return;
   if (bleTxInProgress) return; // never queue
 
-  buildJsonInto(bleTxBuf);
+  buildJsonInto();
   bleTxOffset = 0;
   bleTxInProgress = true;
 
@@ -437,8 +443,7 @@ static void pumpBleTx() {
   }
   if (!bleTxInProgress) return;
 
-  const int totalLen = bleTxBuf.length();
-  if (bleTxOffset >= totalLen) {
+  if (bleTxOffset >= bleTxLen) {
     bleTxInProgress = false;
     return;
   }
@@ -451,14 +456,14 @@ static void pumpBleTx() {
          sent < BLE_PUMP_MAX_CHUNKS &&
          (micros() - startUs) < BLE_PUMP_BUDGET_US) {
 
-    int remain = totalLen - (int)bleTxOffset;
+    int remain = bleTxLen - (int)bleTxOffset;
     if (remain <= 0) {
       bleTxInProgress = false;
       break;
     }
 
     int chunkLen = min((int)BLE_SAFE_CHUNK, remain);
-    const char *p = bleTxBuf.c_str() + bleTxOffset;
+    const char *p = bleTxBuf + bleTxOffset;
 
     pCharacteristic->setValue((uint8_t*)p, chunkLen);
     pCharacteristic->notify();
@@ -467,7 +472,7 @@ static void pumpBleTx() {
     sent++;
   }
 
-  if (bleTxOffset >= totalLen) bleTxInProgress = false;
+  if (bleTxOffset >= bleTxLen) bleTxInProgress = false;
 }
 
 // =============================================
@@ -546,16 +551,19 @@ void loop() {
 
   // Drain CAN RX queue (prevents backlog & improves current responsiveness)
   twai_message_t message;
+  bool gotMessage = false;
   while (twai_receive(&message, 0) == ESP_OK) {
     handleCANMessage(message);
     canMsgCount++;
+    gotMessage = true;
+  }
 
+  // LED optimization: only toggle once per batch, not per message
+  if (gotMessage) {
     digitalWrite(LED_PIN, HIGH);
     lastLEDBlink = millis();
     ledState = true;
-  }
-
-  if (ledState && (millis() - lastLEDBlink > 50)) {
+  } else if (ledState && (millis() - lastLEDBlink > 50)) {
     digitalWrite(LED_PIN, LOW);
     ledState = false;
   }

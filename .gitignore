@@ -65,3 +65,8 @@ build/
 python_web/app.py
 python_web/requirements.txt
 
+# Reference files (private)
+esp32/refer.h
+esp32/reff.pdf
+JAMFOXRS/
+sniff-charging.txt

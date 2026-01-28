@@ -28,6 +28,8 @@ controller, baterai, atau komponen lainnya.
 import asyncio
 import json
 import threading
+import time
+import copy
 import serial
 import serial.tools.list_ports
 from flask import Flask, render_template
@@ -43,29 +45,91 @@ DEVICE_NAME = "Votol_BLE"
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
+# UDP Configuration (WiFi Sniffer)
+UDP_PORT = 4000
+
+# CAN ID Dictionary / Map
+CAN_ID_MAP = {
+    0x0A010810: "DRIVE / TEMPS",
+    0x0A6D0D09: "VOLTAGE / AMPS",
+    0x0E6C0D09: "BATT TEMP",
+    0x0A6E0D09: "SOC / HEALTH",
+    0x0A6F0D09: "CELL STATS",
+    0x0A700D09: "TEMP STATS",
+    0x0A730D09: "BALANCE INFO",
+    0x1810D0F3: "CHARGER 1",
+    0x1811D0F3: "CHARGER 2"
+    # 0x0E6XXXXX are Cell Voltages (dynamic)
+}
+
 # USB Serial Configuration
 USB_SERIAL_PORT = None  # Auto-detect
 USB_SERIAL_BAUD = 115200
 
-# Global data
-latest_data = {
-    "rpm": 0, "speed": 0, "mode": "PARK", "volts": 0.0, "amps": 0.0,
-    "soc": 0, "temps": {"ctrl": 0, "motor": 0, "batt": 0},
-    "cells": [0] * 23, "cellDelta": 0, "canRate": 0,
-    "connType": "DISCONNECTED"
+# Thread safety
+data_lock = threading.Lock()
+
+# Global data (minimal - ESP32 sends complete data)
+latest_data = {"connType": "DISCONNECTED"}
+last_data_time = 0  # Heartbeat timeout detection
+
+# Debug Stats
+ble_stats = {
+    "packets": 0,
+    "bytes": 0,
+    "start_time": 0,
+    "last_packet_time": 0,
+    "burst_count": 0,
+    "hz": 0.0,
+    "kbps": 0.0
 }
 
 ble_connected = False
 ble_client = None
 
+# BLE buffer with overflow protection
 ble_buffer = ""
+MAX_BUFFER_SIZE = 8192  # Prevent memory leak
 
 def notification_handler(sender, data):
-    """Handle BLE notifications with reassembly"""
-    global latest_data, ble_buffer
+    """Handle BLE notifications with reassembly, stats, and thread safety"""
+    global latest_data, ble_buffer, last_data_time, ble_stats
+    
+    # --- STATS CALCULATION ---
+    current_time = time.time()
+    if ble_stats["start_time"] == 0:
+        ble_stats["start_time"] = current_time
+        
+    # Burst detection (< 10ms gap)
+    if (current_time - ble_stats["last_packet_time"]) < 0.010:
+        ble_stats["burst_count"] += 1
+    else:
+        ble_stats["burst_count"] = 0
+        
+    ble_stats["last_packet_time"] = current_time
+    ble_stats["packets"] += 1
+    ble_stats["bytes"] += len(data)
+    
+    # Calculate rates every 1 sec to avoid jitter
+    elapsed = current_time - ble_stats["start_time"]
+    if elapsed >= 1.0:
+        ble_stats["hz"] = ble_stats["packets"] / elapsed
+        ble_stats["kbps"] = (ble_stats["bytes"] / 1024) / elapsed
+        # Reset counters
+        ble_stats["packets"] = 0
+        ble_stats["bytes"] = 0
+        ble_stats["start_time"] = current_time
+    # -------------------------
+
     try:
         content = data.decode('utf-8')
         ble_buffer += content
+        
+        # Buffer overflow protection
+        if len(ble_buffer) > MAX_BUFFER_SIZE:
+            print("[BLE] Buffer overflow, resetting...")
+            ble_buffer = ""
+            return
         
         # Process complete messages (delimited by newline)
         if '\n' in ble_buffer:
@@ -75,13 +139,40 @@ def notification_handler(sender, data):
                     try:
                         data_obj = json.loads(line.strip())
                         data_obj['connType'] = 'BLE'
-                        latest_data = data_obj
+                        
+                        # Inject Debug Stats
+                        data_obj['debug_hz'] = round(ble_stats["hz"], 1)
+                        data_obj['debug_kbps'] = round(ble_stats["kbps"], 1)
+                        data_obj['debug_burst'] = ble_stats["burst_count"]
+                        
+                        # --- CAN SNIFFER EMULATION ---
+                        # Verify we have debug data
+                        if 'debug' in data_obj:
+                            debug = data_obj['debug']
+                            # Emulate Voltage ID 0x0A6D0D09 (contains volts/amps in real CAN)
+                            if 'voltageHex' in debug and 'currentHex' in debug:
+                                socketio.emit('can_sniffer', {'data': f"[BLE-SIM] ID: 0x0A6D0D09 Data: {debug['voltageHex']} {debug['currentHex']} ..."})
+                            
+                            # Emulate SOC ID 0x0A6E0D09
+                            if 'socHex' in debug:
+                                socketio.emit('can_sniffer', {'data': f"[BLE-SIM] ID: 0x0A6E0D09 Data: {debug['socHex']} ..."})
+                                
+                            # Emulate Balance ID 0x0A730D09
+                            if 'balanceHex' in debug:
+                                socketio.emit('can_sniffer', {'data': f"[BLE-SIM] ID: 0x0A730D09 Data: {debug['balanceHex']}"})
+                        # -----------------------------
+                        
+                        # Thread-safe update
+                        with data_lock:
+                            latest_data = copy.deepcopy(data_obj)
+                            last_data_time = time.time()
+                        
                         socketio.emit('dashboard_data', data_obj)
                     except json.JSONDecodeError:
                         pass  # Skip malformed JSON
             ble_buffer = lines[-1]
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[BLE] Notification error: {e}")
 
 async def ble_connect_loop():
     """BLE connection loop with auto-reconnect"""
@@ -181,7 +272,12 @@ def usb_serial_reader():
                             try:
                                 data_obj = json.loads(json_str)
                                 data_obj['connType'] = 'USB'
-                                latest_data.update(data_obj)
+                                
+                                # Thread-safe update
+                                with data_lock:
+                                    latest_data.update(data_obj)
+                                    last_data_time = time.time()
+                                
                                 socketio.emit('dashboard_data', data_obj)
                                 # Print confirmation every 100 messages
                                 if data_obj.get('heartbeat', 0) % 100 == 0:
@@ -202,6 +298,38 @@ def usb_serial_reader():
             
         import time
         time.sleep(3)  # Retry after 3 seconds
+
+def udp_sniffer_listener():
+    """Receive UDP packets from ESP32 WiFi Sniffer"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('0.0.0.0', UDP_PORT))
+    print(f"[UDP] Listening for WiFi Sniffer on port {UDP_PORT}...")
+    
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024) # Buffer size is 1024 bytes
+            text = data.decode('utf-8').strip()
+            
+            # Format: TIMESTAMP,ID,LEN,D0,D1...
+            parts = text.split(',')
+            if len(parts) >= 3:
+                timestamp = parts[0]
+                can_id_hex = parts[1]
+                can_id = int(can_id_hex, 16)
+                
+                # Check for Known ID
+                name = CAN_ID_MAP.get(can_id, "UNKNOWN")
+                
+                # Formatting (reconstruct for display)
+                data_bytes = " ".join(parts[3:])
+                
+                # Emit to Sniffer Panel with timestamp
+                socketio.emit('can_sniffer', {'data': f"[{timestamp}ms] [{name}] 0x{can_id_hex} | {data_bytes}"})
+                
+        except Exception as e:
+            print(f"[UDP] Error: {e}")
+            time.sleep(1)
 
 @app.route('/')
 def index():
@@ -233,6 +361,10 @@ if __name__ == '__main__':
     # Start USB Serial thread
     usb_thread = threading.Thread(target=usb_serial_reader, daemon=True)
     usb_thread.start()
+
+    # Start UDP Sniffer thread
+    udp_thread = threading.Thread(target=udp_sniffer_listener, daemon=True)
+    udp_thread.start()
     
     # Run Flask
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

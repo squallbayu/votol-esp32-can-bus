@@ -22,6 +22,18 @@ Real-time monitoring dashboard for **Votol Controller** and **BMS (Battery Manag
 
 ---
 
+## 🎁 Donasi / Support
+
+Jika project ini bermanfaat bagi Anda, Anda bisa mendukung pengembangan selanjutnya dengan berdonasi melalui QRIS berikut (Scan menggunakan GoPay, OVO, Dana, ShopeePay, BCA Mobile, dll):
+
+<p align="center">
+  <img src="QRIS.jpg" alt="QRIS Zekri R" width="300" />
+</p>
+
+Terima kasih atas dukungan Anda! 🙏
+
+---
+
 ## 📋 Deskripsi Project
 
 Sistem monitoring real-time untuk kendaraan listrik dengan **Votol Controller** dan **BMS** berbasis CAN bus. Data dikirim via Bluetooth Low Energy (BLE) ke Python web dashboard.
@@ -30,12 +42,14 @@ Sistem monitoring real-time untuk kendaraan listrik dengan **Votol Controller** 
 
 | Kategori | Data |
 |----------|------|
-| **Votol Controller** | RPM, Speed, Mode (PARK/DRIVE/SPORT/BRAKE/REVERSE), Controller Temp, Motor Temp |
+| **Votol Controller** | RPM, Speed, Mode (PARK/DRIVE/SPORT/BRAKE/REVERSE/CHARGING), Controller Temp, Motor Temp |
 | **BMS General** | Pack Voltage, Current, Power, SOC (State of Charge), SOH (State of Health), Cycle Count |
 | **BMS Capacity** | Remaining Capacity (Ah), Full Charge Capacity (Ah) |
 | **Cell Voltages** | 23 individual cell voltages (mV), Cell Delta, Highest/Lowest/Average Cell |
 | **Temperatures** | 5 cell temperature sensors, Max/Min Temperature with cell number |
 | **Balance Status** | Balance Mode, Balance Status, Individual cell balancing bitmask |
+| **Charging Info** | Charger Connected Status, Charging Voltage/Current, **Original Charger Detection** |
+| **Device Info** | BMS Hardware Version, BMS Firmware Version |
 
 ---
 
@@ -69,17 +83,14 @@ Sistem monitoring real-time untuk kendaraan listrik dengan **Votol Controller** 
 ## 📁 Struktur Project
 
 ```
-bluetooth_dashboard/
+votol-esp32-can-bus/
 ├── README.md                    # Dokumentasi ini
-├── BLE_GUIDE.md                 # Panduan setup BLE
-├── SNIFF.txt                    # Log CAN sniffer (untuk debugging)
+├── QRIS.jpg                     # QR Code Donasi
 ├── esp32/
-│   ├── votol_ble.ino            # ✅ Firmware ESP32 (UPLOAD INI)
-│   └── votol_frame_request_v2.ino  # Alternative method (experimental)
+│   ├── votol_ble.ino            # Firmware ESP32 (single-core)
+│   └── votol_ble_dualcore.ino   # ✅ Firmware ESP32 Dual-Core (RECOMMENDED)
 └── python_web/
-    ├── app.py                   # Flask server (Bluetooth Classic)
     ├── app_ble.py               # ✅ Flask server (BLE - RECOMMENDED)
-    ├── requirements.txt         # Dependencies (Classic)
     ├── requirements_ble.txt     # Dependencies (BLE)
     └── templates/
         └── dashboard.html       # Web dashboard UI
@@ -98,7 +109,8 @@ bluetooth_dashboard/
    ```
    - Tools → Board → Boards Manager → Install "ESP32"
 
-2. **Buka file** `esp32/votol_ble.ino` di Arduino IDE
+2. **Buka file** `esp32/votol_ble_dualcore.ino` di Arduino IDE
+   > 💡 Gunakan versi **dual-core** untuk performa terbaik (zero CAN message loss)
 
 3. **Pilih Board**: Tools → Board → ESP32 Dev Module
 
@@ -106,9 +118,10 @@ bluetooth_dashboard/
 
 5. **Verifikasi** via Serial Monitor (115200 baud):
    ```
-   === VOTOL BLE DASHBOARD v2.2 (Hybrid + Stable) ===
+   === VOTOL BLE DASHBOARD (Dual-Core) ===
    ✓ BLE: Votol_BLE
    ✓ CAN: 250kbps
+   ✓ Tasks: CAN@Core0, BLE@Core1
    ```
 
 ### 2. Setup Python Dashboard
@@ -131,11 +144,21 @@ Dashboard akan tersedia di: **http://localhost:5000**
 - SOC (%), SOH (%), Cycle Count
 - Controller, Motor, Battery Temperatures
 
+### ✅ Charging System Detection (NEW)
+- Detects when Charger is Connected
+- Identifies **Original Charger** vs Generic
+- Monitors Charging Voltage and Current
+- Special "CHARGING" mode indication
+
 ### ✅ BMS Cell Inspector
 - 23 individual cell voltages
 - Cell delta (mV) - difference between highest and lowest
 - Highest/Lowest/Average cell statistics
 - Color-coded alerts for imbalanced cells
+
+### ✅ Device Information
+- Reads BMS Hardware Version (e.g., H:v21)
+- Reads BMS Firmware Version (e.g., F:v23)
 
 ### ✅ Temperature Monitoring
 - 5 cell temperature sensors
@@ -166,7 +189,11 @@ ESP32 mengirim data dalam format JSON berikut:
   "amps": -15.2,
   "power": -1132,
   "soc": 85,
-  "temps": {"ctrl": 45, "motor": 50, "batt": 35},
+  "temps": {
+    "ctrl": 45,
+    "motor": 50,
+    "batt": 35
+  },
   "cells": [3900, 3905, 3898, ...],
   "cellDelta": 25,
   "canRate": 120,
@@ -195,7 +222,17 @@ ESP32 mengirim data dalam format JSON berikut:
     "status": 1,
     "cells": [false, false, true, ...]
   },
-  "heartbeat": 12345
+  "charger": {
+    "on": 0,
+    "v": 0.0,
+    "a": 0.0,
+    "ori": 0
+  },
+  "bms": {
+    "hw": "H:v21",
+    "fw": "F:v23"
+  },
+  "hb": 12345
 }
 ```
 
@@ -235,7 +272,7 @@ pip install bleak
 
 ## 📝 License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License
 
 ---
 
