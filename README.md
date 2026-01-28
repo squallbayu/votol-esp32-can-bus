@@ -27,7 +27,7 @@ Real-time monitoring dashboard for **Votol Controller** and **BMS (Battery Manag
 Jika project ini bermanfaat bagi Anda, Anda bisa mendukung pengembangan selanjutnya dengan berdonasi melalui QRIS berikut (Scan menggunakan GoPay, OVO, Dana, ShopeePay, BCA Mobile, dll):
 
 <p align="center">
-  <img src="QRIS.jpg" alt="QRIS Zekri R" width="300" />
+  <img src="QRIS.jpg" alt="QRIS Zekri R" width="200" />
 </p>
 
 Terima kasih atas dukungan Anda! 🙏
