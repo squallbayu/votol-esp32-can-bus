@@ -25,9 +25,8 @@ jobs:
 
       - name: Install Libraries
         run: |
-          # ESP32 core has builtin BLE and WiFi, but we might need others if specified
-          # Installing Preferences if needed (usually builtin)
-          echo "Libraries installed"
+          arduino-cli lib install "ESP Async WebServer"
+          arduino-cli lib install "AsyncTCP"
 
       - name: Compile Firmware
         run: |
