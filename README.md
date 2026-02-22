@@ -55,6 +55,8 @@ Sistem monitoring real-time untuk kendaraan listrik dengan **Votol Controller** 
 
 ---
 
+---
+
 ## 📥 Download & Jalankan (Cara Mudah)
 
 Anda tidak perlu menginstall Python atau dependency apapun. Cukup download binary yang sudah di-compile dari halaman **Releases**.
@@ -67,6 +69,8 @@ Kunjungi halaman **[Releases](../../releases)** dan download file sesuai sistem 
 - **macOS**: `votol-dashboard-darwin-amd64` (Intel) atau `votol-dashboard-darwin-arm64` (Apple Silicon)
 - **Firmware ESP32**: `firmware.bin`
 
+> 🍎 **Note untuk macOS:** Binary macOS di build secara native (tanpa cross-compilation) sehingga fitur BLE berfungsi 100% menggunakan Apple CoreBluetooth.
+
 ### 2. Jalankan Aplikasi
 **Windows**: 
 Double-click `votol-dashboard-windows-amd64.exe`. Browser akan otomatis terbuka.
@@ -74,13 +78,11 @@ Double-click `votol-dashboard-windows-amd64.exe`. Browser akan otomatis terbuka.
 **Linux / macOS**:
 Buka terminal dan jalankan:
 ```bash
-chmod +x votol-dashboard-linux-amd64  # Beri izin eksekusi
+chmod +x votol-dashboard-linux-amd64  # Sesuaikan dengan nama file yang di-download
 ./votol-dashboard-linux-amd64
 ```
 
-Web dashboard akan terbuka di browser secara otomatis.
-
-> **Catatan**: Aplikasi ini akan otomatis mendeteksi ESP32 via USB Serial, BLE, atau WiFi Sniffer.
+Web dashboard akan otomatis terbuka dan mencoba mendeteksi ESP32 via BLE, USB Serial, atau integrasi WiFi.
 
 ---
 
@@ -110,108 +112,56 @@ Hubungkan ESP32 dengan CAN Transceiver (SN65HVD230 recommended):
    esptool.py --chip esp32 --port /dev/ttyUSB0 write_flash 0x10000 firmware.bin
    ```
    
-> **Note**: Firmware ini support Dual-Core (Core 0 CAN, Core 1 BLE/WiFi) untuk performa maksimal.
+> ⚡ **FITUR DUAL-CORE**: Firmware ini sekarang menggunakan arsitektur Dual-Core (Core 0 khusus untuk membaca CAN Bus, Core 1 untuk BLE/WiFi/OTA) sehingga bebas bottleneck dan jauh lebih responsif!
 
 ---
 
 ## 🎯 Features
 
-### ✅ Real-time Monitoring
+### ✅ Real-time Monitoring & Logging
 - Speed, RPM, Mode (PARK/DRIVE/SPORT/BRAKE/REVERSE)
 - Pack Voltage, Current, Power
 - SOC (%), SOH (%), Cycle Count
 - Controller, Motor, Battery Temperatures
 
-### ✅ Charging System Detection (NEW)
-- Detects when Charger is Connected
-- Identifies **Original Charger** vs Generic
-- Monitors Charging Voltage and Current
-- Special "CHARGING" mode indication
+### ✅ Advanced Charging System (Injector)
+- Deteksi otomatis saat Charger terhubung (Original vs Generic)
+- Fitur **CAN Injector** untuk mensimulasikan protokol original charger, memungkinkan charging dengan charger 3rd-party.
+- Mode "CHARGING" otomatis menyesuaikan kecepatan parsing untuk menghemat CPU.
 
-### ✅ BMS Cell Inspector
-- 23 individual cell voltages
-- Cell delta (mV) - difference between highest and lowest
-- Highest/Lowest/Average cell statistics
-- Color-coded alerts for imbalanced cells
+### ✅ Terintegrasi dengan OTA (Over-The-Air)
+- Update firmware ESP32 langsung melalui Web Dashboard via WiFi, tanpa perlu mencolok kabel USB lagi!
 
 ### ✅ Dual Transport Mode
-- **BLE Mode (Default)**: Auto-connect, stable, low power, ~10m range
-- **WiFi Mode**: Longer range (~50m), higher throughput, auto-return to BLE
-- **USB Serial (Fallback)**: Direct connection for debugging
-
----
-
-## 🌐 WiFi Mode
-
-ESP32 support WiFi AP mode sebagai alternatif dari BLE:
-
-### Cara Switch ke WiFi Mode
-Dari Flutter app (via BLE), kirim command: `WIFI:ON`
-
-ESP32 akan:
-1. Stop BLE dan matikan advertising
-2. Start WiFi AP dengan SSID: `VOTOL_Dashboard`
-3. Start WebSocket server di port 81 (Password: `votol1234`, IP: `192.168.4.1`)
-
----
-
-## 📊 JSON Data Format
-
-Aplikasi Go ini otomatis mengkonversi format JSON ringkas (diciptakan untuk efisiensi ESP32) menjadi format lengkap untuk Web Dashboard.
-
-**Input (Raw from ESP32):** `{"v":72.5, "a":10.0, "r": 1500 ...}`
-
-**Output (Processed by Go App):**
-```json
-{
-  "volts": 72.5,
-  "amps": 10.0,
-  "rpm": 1500,
-  "mode": "SPORT",
-  "temps": {"ctrl": 45, "motor": 50, "batt": 35},
-  ...
-}
-```
-
-> 📖 **Dokumentasi Protokol Lengkap**: [docs/BLE_WIFI_PROTOCOL.md](docs/BLE_WIFI_PROTOCOL.md)
-
----
-
-## 📱 Android App (Alternative)
-
-Selain menggunakan Web Dashboard di PC, Anda juga bisa menggunakan aplikasi Android:
-**[Download PEV App Release](https://github.com/zexry619/pev-app-release)**
+- **BLE Mode (Default)**: Auto-connect, hemat daya, sangat stabil.
+- **WiFi Mode**: Range lebih jauh, digunakan untuk fitur OTA (Over-The-Air) update. Transisi BLE ↔ WiFi diatur secara mulus.
+- **USB Serial**: Fallback mode untuk debugging langsung.
 
 ---
 
 ## 💻 Build from Source (Advanced)
 
-Jika Anda ingin memodifikasi kode Go atau Firmware:
+Jika Anda ingin memodifikasi kode Go atau Firmware secara mandiri:
 
 ### Go Dashboard
+Kode Go sekarang menggunakan build tags untuk memisahkan implementasi BLE CGO.
 ```bash
 cd go_web
-go build -o votol-dashboard .
+# Compile dengan BLE (hanya bisa di Linux atau macOS lokal)
+CGO_ENABLED=1 go build -o votol-dashboard .
+
+# Compile tanpa BLE (untuk cross-compilation CI)
+CGO_ENABLED=0 go build -o votol-dashboard .
 ```
 
 ### ESP32 Firmware
-Gunakan Arduino IDE dengan `esp32:esp32` core. Buka `esp32/votol_ble_dualcore/votol_ble_dualcore.ino`.
+Gunakan **Arduino IDE** dengan konfigurasi berikut:
+1. Instal ESP32 Board Manager versi **2.0.17** (Versi 3.x tidak kompatibel dengan library AsyncTCP).
+2. Board: **ESP32 Dev Module**
+3. Partition Scheme: **Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)** *(WAJIB! Firmware ini terlalu besar untuk default scheme).*
+4. Pastikan menginstal library `AsyncTCP` dan `ESPAsyncWebServer` langsung dari [repo me-no-dev](https://github.com/me-no-dev/ESPAsyncWebServer).
 
----
-
-## 🔧 Troubleshooting
-
-### ESP32 tidak terdeteksi
-- Pastikan driver USB UART sudah terinstall (CP210x atau CH340).
-- Cek kabel data USB (bukan kabel charge only).
-
-### Data tidak muncul di Dashboard
-- **Serial**: Pastikan tidak ada aplikasi lain yang menggunakan port COM/ttyUSB.
-- **BLE**: Pastikan PC Anda support Bluetooth 4.0+.
-- **Wiring**: Cek kembali wiring CAN bus (High/Low jangan terbalik).
-
-### CAN Baud Rate
-- Default: **250kbps**. Pastikan Votol disetting ke 250kbps jika tidak muncul data.
+Buka `esp32/votol_ble_dualcore/votol_ble_dualcore.ino` dan klik Upload.
 
 ---
 
@@ -219,3 +169,4 @@ Gunakan Arduino IDE dengan `esp32:esp32` core. Buka `esp32/votol_ble_dualcore/vo
 MIT License
 
 *Copyright (c) 2026 Zekri R*
+
