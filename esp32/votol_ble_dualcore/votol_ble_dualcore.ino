@@ -234,8 +234,7 @@ int valBattTemp = 0;
 // Handle Write Requests from Flutter
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string rxValue = pCharacteristic->getValue();
-      String value = String(rxValue.c_str());
+      String value = pCharacteristic->getValue();
 
       if (value.length() > 0) {
         // Simple command parser
@@ -588,10 +587,48 @@ bool isCanBusHealthy() {
 }
 
 // =============================================
+// DYNAMIC TWAI MODE SWITCHER
+// =============================================
+bool currentTwaiModeNormal = false; // By default we start in LISTEN_ONLY (false)
+
+void switchTwaiMode(bool normalMode) {
+  if (currentTwaiModeNormal == normalMode) return; // Already in target mode
+
+  // Stop and uninstall the current driver
+  twai_stop();
+  twai_driver_uninstall();
+
+  // Re-install with new mode
+  twai_mode_t newMode = normalMode ? TWAI_MODE_NORMAL : TWAI_MODE_LISTEN_ONLY;
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, newMode);
+  g_config.rx_queue_len = 50; // Use larger queue to prevent data loss 
+  
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+  twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    if (twai_start() == ESP_OK) {
+      currentTwaiModeNormal = normalMode;
+      // Serial.printf("[CAN] Switched mode to %s\n", normalMode ? "NORMAL" : "LISTEN_ONLY");
+    } else {
+      Serial.println("[CAN] ERROR: Failed to start after mode switch!");
+    }
+  } else {
+    Serial.println("[CAN] ERROR: Failed to install after mode switch!");
+  }
+}
+
+// =============================================
 // CAN INJECTOR (Simulate Original Charger)
 // =============================================
 void injectChargerMessage() {
-  if (!isCanBusHealthy()) return;  // Skip TX if bus unhealthy
+  // Before injecting, we MUST be in NORMAL mode to allow TX (Transmit)
+  switchTwaiMode(true);
+  
+  if (!isCanBusHealthy()) {
+    switchTwaiMode(false); // Revert back if not healthy
+    return;
+  }
   
   twai_message_t tx_msg;
   memset(&tx_msg, 0, sizeof(tx_msg));  // Zero-init ALL fields (critical: rtr must be 0)
@@ -614,6 +651,9 @@ void injectChargerMessage() {
     // Only log on unexpected errors, not on timeout (queue full)
     // Serial.printf("[CAN] Inject failed: %d\n", result);
   }
+  
+  // After injection we switch back to LISTEN_ONLY so we don't spam ACK to the speedometer
+  switchTwaiMode(false);
 }
 
 
@@ -630,12 +670,10 @@ void canTask(void *pvParameters) {
   while (true) {
     gotMessage = false;
     
-    // Drain CAN RX queue (Rate Limited)
-    int processed = 0;
-    while (processed < 10 && twai_receive(&message, 0) == ESP_OK) {
+    // Drain CAN RX queue (Rate Limited) - Process as many as possible to avoid queue overflow
+    while (twai_receive(&message, 0) == ESP_OK) {
       handleCANMessage(message);
       canMsgCount++;
-      processed++;
       gotMessage = true;
     }
 
@@ -1446,10 +1484,10 @@ void setup() {
     pCharacteristic = nullptr;
   }
 
-  // CAN (TWAI) Setup - Optimized Queue
+  // CAN (TWAI) Setup - Use LISTEN_ONLY as default to prevent ACK clashes with speedometer
   twai_general_config_t g_config =
-      TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
-  g_config.rx_queue_len = 10; // Reduce queue to prevent stale data buildup
+      TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_LISTEN_ONLY);
+  g_config.rx_queue_len = 50; // Increase queue to prevent stale data buildup & drops
 
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
