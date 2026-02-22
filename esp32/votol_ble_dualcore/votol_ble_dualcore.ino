@@ -1296,12 +1296,13 @@ static void sendWsFastUpdate() {
   }
 
   int len = snprintf(wsTxBuf, sizeof(wsTxBuf),
-    "{\"r\":%d,\"s\":%d,\"m\":\"%s\",\"v\":%.1f,\"a\":%.1f,\"p\":%.0f,\"sc\":%d,\"t\":{\"c\":%d,\"m\":%d,\"b\":%d},\"cr\":%lu,\"hb\":%lu,\"type\":\"fast\"}\n",
+    "{\"r\":%d,\"s\":%d,\"m\":\"%s\",\"v\":%.1f,\"a\":%.1f,\"p\":%.0f,\"sc\":%d,\"t\":{\"c\":%d,\"m\":%d,\"b\":%d},\"cr\":%lu,\"hb\":%lu,\"inj\":%d,\"type\":\"fast\"}\n",
     localRPM, localSpeed, getModeString(localMode),
     localVolts, localAmpere, localPower, localSOC,
     localCtrlTemp, localMotorTemp, localBattTemp,
     (unsigned long)localCanRate,
-    (unsigned long)heartbeatCounter++
+    (unsigned long)heartbeatCounter++,
+    isInjectorEnabled.load(std::memory_order_acquire) ? 1 : 0
   );
   
   if (len > 0 && len < (int)sizeof(wsTxBuf)) {
