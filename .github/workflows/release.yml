@@ -44,7 +44,7 @@ jobs:
           name: firmware
           path: build/firmware/firmware.bin
 
-  build-go-web:
+  build-go-linux-windows:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,39 +54,50 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Install Dependencies (Linux cross-compilation helpers)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev xorg-dev libasound2-dev
-
       - name: Build Linux (amd64)
         working-directory: go_web
-        run: GOOS=linux GOARCH=amd64 go build -o ../votol-dashboard-linux-amd64 .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../votol-dashboard-linux-amd64 .
 
       - name: Build Linux (arm64)
         working-directory: go_web
-        run: GOOS=linux GOARCH=arm64 go build -o ../votol-dashboard-linux-arm64 .
-      
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../votol-dashboard-linux-arm64 .
+
       - name: Build Windows (amd64)
         working-directory: go_web
-        run: GOOS=windows GOARCH=amd64 go build -o ../votol-dashboard-windows-amd64.exe .
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o ../votol-dashboard-windows-amd64.exe .
+
+      - name: Upload Linux/Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-binaries-linux-windows
+          path: votol-dashboard-*
+
+  build-go-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
       - name: Build macOS (amd64)
         working-directory: go_web
-        run: GOOS=darwin GOARCH=amd64 go build -o ../votol-dashboard-darwin-amd64 .
-        
+        run: GOARCH=amd64 go build -o ../votol-dashboard-darwin-amd64 .
+
       - name: Build macOS (arm64)
         working-directory: go_web
-        run: GOOS=darwin GOARCH=arm64 go build -o ../votol-dashboard-darwin-arm64 .
+        run: GOARCH=arm64 go build -o ../votol-dashboard-darwin-arm64 .
 
-      - name: Upload Go Artifacts
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: go-binaries
+          name: go-binaries-macos
           path: votol-dashboard-*
 
   create-release:
-    needs: [build-firmware, build-go-web]
+    needs: [build-firmware, build-go-linux-windows, build-go-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download Firmware
@@ -94,10 +105,15 @@ jobs:
         with:
           name: firmware
 
-      - name: Download Go Binaries
+      - name: Download Linux/Windows Binaries
         uses: actions/download-artifact@v4
         with:
-          name: go-binaries
+          name: go-binaries-linux-windows
+
+      - name: Download macOS Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: go-binaries-macos
 
       - name: Release
         uses: softprops/action-gh-release@v1
