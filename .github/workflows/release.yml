@@ -33,7 +33,7 @@ jobs:
       - name: Compile Firmware
         run: |
           mkdir -p build/firmware
-          arduino-cli compile --fqbn esp32:esp32:esp32doit-devkit-v1:PartitionScheme=huge_app --output-dir build/firmware esp32/votol_ble_dualcore/votol_ble_dualcore.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --output-dir build/firmware esp32/votol_ble_dualcore/votol_ble_dualcore.ino
 
       - name: Rename Firmware
         run: mv build/firmware/votol_ble_dualcore.ino.bin build/firmware/firmware.bin
