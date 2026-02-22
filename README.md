@@ -165,6 +165,68 @@ Buka `esp32/votol_ble_dualcore/votol_ble_dualcore.ino` dan klik Upload.
 
 ---
 
+## 🌐 WiFi Mode
+
+ESP32 support WiFi AP mode sebagai alternatif dari BLE:
+
+### Cara Switch ke WiFi Mode
+Dari Go Web Dashboard atau aplikasi Android, kirim command BLE: `WIFI:ON`
+
+ESP32 akan:
+1. Stop BLE dan matikan advertising.
+2. Start WiFi Access Point dengan SSID: **`VOTOL_Dashboard`**
+3. Start WebSocket server di port 81 (Password: **`votol1234`**, IP: **`192.168.4.1`**)
+4. Mengaktifkan web server internal untuk fitur **OTA Firmware Update**.
+
+---
+
+## 📊 JSON Data Format
+
+Aplikasi Go ini otomatis mengkonversi format JSON ringkas (diciptakan untuk efisiensi RAM/Flash ESP32) agar pas di broadcast ke browser WebSocket client.
+
+**Input Buffer (Raw serial/BLE from ESP32):** 
+```json
+{"v":72.5, "a":10.0, "r": 1500, "m": "SPORT", "t": {"c": 45, "m": 50, "b": 35}}
+```
+
+**Output (Processed Desktop Dashboard):**
+```json
+{
+  "volts": 72.5,
+  "amps": 10.0,
+  "rpm": 1500,
+  "mode": "SPORT",
+  "temps": {"ctrl": 45, "motor": 50, "batt": 35}
+}
+```
+
+> 📖 **Dokumentasi Protokol Lengkap**: [docs/BLE_WIFI_PROTOCOL.md](docs/BLE_WIFI_PROTOCOL.md)
+
+---
+
+## 📱 Android App (Alternative)
+
+Selain menggunakan Web Dashboard di PC berbasis Go ini, firmware ESP32 ini 100% kompatibel dengan aplikasi Android lama.
+**[Download PEV App Release](https://github.com/zexry619/pev-app-release)**
+
+---
+
+## 🔧 Troubleshooting
+
+### ESP32 tidak terdeteksi via Kabel
+- Pastikan driver USB UART sudah terinstall (CP210x atau CH340).
+- Cek kabel data USB (bukan kabel charge only).
+
+### Data tidak muncul di Dashboard
+- **Serial**: Pastikan tidak ada aplikasi lain yang menggunakan port COM/ttyUSB.
+- **BLE**: Pastikan PC Anda support Bluetooth 4.0+.
+- **Wiring**: Cek kembali wiring CAN bus (High/Low jangan terbalik, butuh resistor 120-ohm jika modul tidak menyediakannya).
+
+### CAN Baud Rate
+- Default project: **250kbps**. Pastikan parameter CAN controller Votol disetting ke 250kbps agar data muncul.
+
+---
+
 ## 📝 License
 MIT License
 
