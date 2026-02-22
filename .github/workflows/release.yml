@@ -84,11 +84,11 @@ jobs:
 
       - name: Build macOS (amd64)
         working-directory: go_web
-        run: GOARCH=amd64 go build -o ../votol-dashboard-darwin-amd64 .
+        run: CGO_ENABLED=0 GOARCH=amd64 go build -o ../votol-dashboard-darwin-amd64 .
 
       - name: Build macOS (arm64)
         working-directory: go_web
-        run: GOARCH=arm64 go build -o ../votol-dashboard-darwin-arm64 .
+        run: CGO_ENABLED=0 GOARCH=arm64 go build -o ../votol-dashboard-darwin-arm64 .
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
