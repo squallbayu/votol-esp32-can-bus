@@ -18,9 +18,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Update.h>
 #include "driver/twai.h"
 
 // === CONFIGURATION ===
+#define FIRMWARE_VERSION "1.0.0"
+
 const char* ap_ssid = "VOTOL_SNIFFER";
 const char* ap_pass = "12345678";
 
@@ -55,6 +58,11 @@ const int CAN_IDS_COUNT = sizeof(CAN_IDS) / sizeof(CAN_IDS[0]);
 
 // Web Server
 WebServer server(80);
+
+// OTA State
+volatile bool otaInProgress = false;
+volatile size_t otaProgress = 0;
+volatile size_t otaTotal = 0;
 
 // Message buffer
 #define MAX_MESSAGES 100
@@ -114,6 +122,7 @@ input{background:#111;color:#0f0;border:1px solid #0f0;padding:6px;width:150px}
 <button id="bp" onclick="togglePause()">⏸ Pause</button>
 <button onclick="document.getElementById('log').innerHTML='';tc=0;document.getElementById('t').textContent='0'">🗑 Clear</button>
 <button id="bs" class="on" onclick="toggleScroll()">⬇ Scroll</button>
+<button onclick="location.href='/ota'">📦 OTA Update</button>
 <input id="f" placeholder="Filter (e.g. VOLT)">
 </div>
 <div id="log"></div>
@@ -154,6 +163,165 @@ poll();
 )rawliteral";
 
 // =============================================
+// OTA UPDATE PAGE
+// =============================================
+const char OTA_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OTA Update - VOTOL Sniffer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#0f0;font-family:Consolas,Monaco,monospace;padding:20px;min-height:100vh}
+.container{max-width:500px;margin:0 auto}
+h1{color:#0ff;font-size:1.5em;margin-bottom:20px}
+.info{background:#111;border:1px solid #333;padding:15px;margin-bottom:20px;border-radius:4px}
+.info p{margin:5px 0;font-size:13px}
+.info .version{color:#ff0;font-size:16px}
+.upload-area{background:#111;border:2px dashed #0f0;padding:40px;text-align:center;margin-bottom:20px;border-radius:4px;cursor:pointer;transition:all 0.3s}
+.upload-area:hover{background:#1a1a1a;border-color:#0ff}
+.upload-area.dragover{background:#002200;border-color:#0f0}
+.upload-area input{display:none}
+.upload-area .icon{font-size:48px;margin-bottom:10px}
+.upload-area p{color:#888}
+.file-info{color:#ff0;margin-top:10px;display:none}
+.progress{background:#222;border:1px solid #333;height:30px;margin-bottom:20px;display:none;border-radius:4px;overflow:hidden}
+.progress-bar{background:linear-gradient(90deg,#0a0,#0f0);height:100%;width:0%;transition:width 0.3s;display:flex;align-items:center;justify-content:center;color:#000;font-weight:bold}
+.btn{background:#333;color:#0f0;border:1px solid #0f0;padding:12px 24px;cursor:pointer;font-size:14px;width:100%;margin-bottom:10px;border-radius:4px;transition:all 0.2s}
+.btn:hover{background:#0f0;color:#000}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn-back{background:transparent;border-color:#888;color:#888}
+.btn-back:hover{border-color:#0f0;color:#0f0;background:transparent}
+.status{padding:15px;margin-bottom:20px;border-radius:4px;display:none}
+.status.error{background:#300;border:1px solid #f00;color:#f88}
+.status.success{background:#030;border:1px solid #0f0;color:#0f0}
+.status.info{background:#330;border:1px solid #ff0;color:#ff0}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>📦 OTA Firmware Update</h1>
+
+<div class="info">
+<p class="version">Current Version: )==VERSION==</p>
+<p>Free Heap: <span id="heap">-</span> bytes</p>
+<p>Flash Size: <span id="flash">-</span> bytes</p>
+</div>
+
+<div class="status" id="status"></div>
+
+<div class="upload-area" id="dropZone">
+<div class="icon">📁</div>
+<p>Click or drag .bin file here</p>
+<input type="file" id="fileInput" accept=".bin">
+<div class="file-info" id="fileInfo"></div>
+</div>
+
+<div class="progress" id="progress">
+<div class="progress-bar" id="progressBar">0%</div>
+</div>
+
+<button class="btn" id="uploadBtn" onclick="startUpload()" disabled>🚀 Start Update</button>
+<button class="btn btn-back" onclick="location.href='/'">← Back to Sniffer</button>
+</div>
+
+<script>
+var selectedFile = null;
+
+// Get system info
+fetch('/ota/info').then(r=>r.json()).then(d=>{
+  document.getElementById('heap').textContent = d.heap.toLocaleString();
+  document.getElementById('flash').textContent = d.flash.toLocaleString();
+});
+
+// Drag and drop
+var dropZone = document.getElementById('dropZone');
+var fileInput = document.getElementById('fileInput');
+
+dropZone.onclick = () => fileInput.click();
+
+dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
+dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+dropZone.ondrop = (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+};
+
+fileInput.onchange = () => { if(fileInput.files.length) handleFile(fileInput.files[0]); };
+
+function handleFile(file) {
+  if(!file.name.endsWith('.bin')) {
+    showStatus('Please select a .bin file', 'error');
+    return;
+  }
+  selectedFile = file;
+  document.getElementById('fileInfo').style.display = 'block';
+  document.getElementById('fileInfo').textContent = file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)';
+  document.getElementById('uploadBtn').disabled = false;
+  showStatus('File ready. Click "Start Update" to begin.', 'info');
+}
+
+function showStatus(msg, type) {
+  var s = document.getElementById('status');
+  s.textContent = msg;
+  s.className = 'status ' + type;
+  s.style.display = 'block';
+}
+
+function startUpload() {
+  if(!selectedFile) return;
+  
+  document.getElementById('uploadBtn').disabled = true;
+  document.getElementById('progress').style.display = 'block';
+  showStatus('Uploading firmware... Do not disconnect!', 'info');
+  
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/ota/upload', true);
+  
+  xhr.upload.onprogress = (e) => {
+    if(e.lengthComputable) {
+      var pct = Math.round((e.loaded / e.total) * 100);
+      document.getElementById('progressBar').style.width = pct + '%';
+      document.getElementById('progressBar').textContent = pct + '%';
+    }
+  };
+  
+  xhr.onload = () => {
+    if(xhr.status === 200) {
+      var r = JSON.parse(xhr.responseText);
+      if(r.success) {
+        document.getElementById('progressBar').style.width = '100%';
+        document.getElementById('progressBar').textContent = '100%';
+        showStatus('Update successful! Rebooting in 3 seconds...', 'success');
+        setTimeout(() => { location.href = '/'; }, 5000);
+      } else {
+        showStatus('Update failed: ' + r.error, 'error');
+        document.getElementById('uploadBtn').disabled = false;
+      }
+    } else {
+      showStatus('Upload failed: HTTP ' + xhr.status, 'error');
+      document.getElementById('uploadBtn').disabled = false;
+    }
+  };
+  
+  xhr.onerror = () => {
+    showStatus('Connection error', 'error');
+    document.getElementById('uploadBtn').disabled = false;
+  };
+  
+  var formData = new FormData();
+  formData.append('firmware', selectedFile);
+  xhr.send(formData);
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+// =============================================
 // WEB HANDLERS
 // =============================================
 void handleRoot() {
@@ -161,6 +329,12 @@ void handleRoot() {
 }
 
 void handleData() {
+  // Skip during OTA to prioritize update
+  if (otaInProgress) {
+    server.send(503, "application/json", "{\"error\":\"OTA in progress\"}");
+    return;
+  }
+  
   int afterIndex = 0;
   if (server.hasArg("after")) {
     afterIndex = server.arg("after").toInt();
@@ -203,6 +377,84 @@ void handleData() {
   
   json += "]}";
   server.send(200, "application/json", json);
+}
+
+// =============================================
+// OTA HANDLERS
+// =============================================
+void handleOtaPage() {
+  String html = OTA_PAGE;
+  html.replace(")==VERSION==", FIRMWARE_VERSION);
+  server.send(200, "text/html", html);
+}
+
+void handleOtaInfo() {
+  String json = "{\"heap\":";
+  json += String(ESP.getFreeHeap());
+  json += ",\"flash\":";
+  json += String(ESP.getFlashChipSize());
+  json += ",\"version\":\"";
+  json += FIRMWARE_VERSION;
+  json += "\"}";
+  server.send(200, "application/json", json);
+}
+
+void handleOtaUpload() {
+  HTTPUpload& upload = server.upload();
+  
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("[OTA] Begin: %s (%u bytes free)\n", upload.filename.c_str(), ESP.getFreeHeap());
+    
+    otaInProgress = true;
+    otaProgress = 0;
+    otaTotal = 0;
+    
+    // Start update - use max available size
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Serial.printf("[OTA] Begin failed: %s\n", Update.errorString());
+      otaInProgress = false;
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.isRunning()) {
+      size_t written = Update.write(upload.buf, upload.currentSize);
+      if (written != upload.currentSize) {
+        Serial.printf("[OTA] Write error: %s\n", Update.errorString());
+      }
+      otaProgress += written;
+      
+      // Progress feedback via LED
+      digitalWrite(LED_PIN, (millis() / 100) % 2);
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("[OTA] Success! Total: %u bytes\n", upload.totalSize);
+    } else {
+      Serial.printf("[OTA] End failed: %s\n", Update.errorString());
+    }
+    otaInProgress = false;
+    digitalWrite(LED_PIN, LOW);
+  } 
+  else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    otaInProgress = false;
+    Serial.println("[OTA] Aborted");
+    digitalWrite(LED_PIN, LOW);
+  }
+}
+
+void handleOtaResult() {
+  if (Update.hasError()) {
+    String error = Update.errorString();
+    String json = "{\"success\":false,\"error\":\"" + error + "\"}";
+    server.send(200, "application/json", json);
+  } else {
+    server.send(200, "application/json", "{\"success\":true}");
+    delay(1000);
+    Serial.println("[OTA] Rebooting...");
+    ESP.restart();
+  }
 }
 
 // =============================================
@@ -252,6 +504,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   
   Serial.println("\n=== VOTOL CAN SNIFFER - WEB UI ===");
+  Serial.printf("Firmware Version: %s\n", FIRMWARE_VERSION);
   
   // Start WiFi AP
   WiFi.softAP(ap_ssid, ap_pass);
@@ -263,6 +516,9 @@ void setup() {
   // Setup Web Server
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/ota", handleOtaPage);
+  server.on("/ota/info", handleOtaInfo);
+  server.on("/ota/upload", HTTP_POST, handleOtaResult, handleOtaUpload);
   server.begin();
   Serial.println("Web Server started on port 80");
   
@@ -283,6 +539,7 @@ void setup() {
   xTaskCreatePinnedToCore(canTask, "CAN", 4096, NULL, 2, NULL, 0);
   
   Serial.println("\nOpen browser: http://192.168.4.1");
+  Serial.println("OTA Update:  http://192.168.4.1/ota");
   Serial.println("================================\n");
 }
 

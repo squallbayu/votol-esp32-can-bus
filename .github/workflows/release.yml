@@ -1,0 +1,107 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v1
+
+      - name: Install ESP32 Core
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install Libraries
+        run: |
+          # ESP32 core has builtin BLE and WiFi, but we might need others if specified
+          # Installing Preferences if needed (usually builtin)
+          echo "Libraries installed"
+
+      - name: Compile Firmware
+        run: |
+          mkdir -p build/firmware
+          arduino-cli compile --fqbn esp32:esp32:esp32doit-devkit-v1 --output-dir build/firmware esp32/votol_ble_dualcore/votol_ble_dualcore.ino
+
+      - name: Rename Firmware
+        run: mv build/firmware/votol_ble_dualcore.ino.bin build/firmware/firmware.bin
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware
+          path: build/firmware/firmware.bin
+
+  build-go-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install Dependencies (Linux cross-compilation helpers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev libasound2-dev
+
+      - name: Build Linux (amd64)
+        working-directory: go_web
+        run: GOOS=linux GOARCH=amd64 go build -o ../votol-dashboard-linux-amd64 .
+
+      - name: Build Linux (arm64)
+        working-directory: go_web
+        run: GOOS=linux GOARCH=arm64 go build -o ../votol-dashboard-linux-arm64 .
+      
+      - name: Build Windows (amd64)
+        working-directory: go_web
+        run: GOOS=windows GOARCH=amd64 go build -o ../votol-dashboard-windows-amd64.exe .
+
+      - name: Build macOS (amd64)
+        working-directory: go_web
+        run: GOOS=darwin GOARCH=amd64 go build -o ../votol-dashboard-darwin-amd64 .
+        
+      - name: Build macOS (arm64)
+        working-directory: go_web
+        run: GOOS=darwin GOARCH=arm64 go build -o ../votol-dashboard-darwin-arm64 .
+
+      - name: Upload Go Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: go-binaries
+          path: votol-dashboard-*
+
+  create-release:
+    needs: [build-firmware, build-go-web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Firmware
+        uses: actions/download-artifact@v3
+        with:
+          name: firmware
+
+      - name: Download Go Binaries
+        uses: actions/download-artifact@v3
+        with:
+          name: go-binaries
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            firmware.bin
+            votol-dashboard-*
