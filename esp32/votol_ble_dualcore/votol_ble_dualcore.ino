@@ -234,7 +234,12 @@ int valBattTemp = 0;
 // Handle Write Requests from Flutter
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
       String value = pCharacteristic->getValue();
+#else
+      std::string rxValue = pCharacteristic->getValue();
+      String value = String(rxValue.c_str());
+#endif
 
       if (value.length() > 0) {
         // Simple command parser
