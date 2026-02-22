@@ -30,6 +30,29 @@ extern AsyncWebServer wsServer;
 extern AsyncWebSocket ws;
 extern bool wifiModeActive;
 
+// === Vehicle Mode Enum (shared between .ino and .cpp) ===
+#ifndef VEHICLE_MODE_ENUM_DEFINED
+#define VEHICLE_MODE_ENUM_DEFINED
+enum VehicleMode : uint8_t {
+  MODE_PARK = 0,
+  MODE_STAND,
+  MODE_CHARGING,
+  MODE_DRIVE,
+  MODE_SPORT,
+  MODE_REVERSE,
+  MODE_BRAKE
+};
+
+inline const char* getModeString(VehicleMode m) {
+  static const char* const modeStrings[] = {
+    "PARK", "STAND", "CHARGING", "DRIVE", "SPORT", "REVERSE", "BRAKE"
+  };
+  uint8_t mVal = static_cast<uint8_t>(m);
+  if (mVal >= 7) return "UNKNOWN";
+  return modeStrings[mVal];
+}
+#endif
+
 // === Transport Mode Enum ===
 #ifndef TRANSPORT_MODE_ENUM_DEFINED
 #define TRANSPORT_MODE_ENUM_DEFINED

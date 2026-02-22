@@ -15,7 +15,16 @@ extern BLEServer* pServer;
 // External declarations from main .ino
 extern Preferences preferences;
 extern SemaphoreHandle_t nvsMutex;
+extern SemaphoreHandle_t dataMutex;
 extern std::atomic<bool> isInjectorEnabled;
+extern bool currentTwaiModeNormal;
+
+// For inject status
+extern std::atomic<int32_t> atomicAmpereRaw;
+extern std::atomic<VehicleMode> atomicMode;
+extern bool bmsChargingFlag;
+extern bool chargerConnected;
+extern bool oriChargerDetected;
 
 // Helper: NVS write with mutex protection
 static inline void nvsWriteBool(const char* key, bool val) {
@@ -103,19 +112,7 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         String cmd((char*)data, len);
         Serial.printf("[WiFi] Command received: '%s'\n", cmd.c_str());
         
-        if (cmd.startsWith("INJECT:")) {
-           char cmdVal = cmd.charAt(7);
-           if (cmdVal == '1') {
-             isInjectorEnabled.store(true, std::memory_order_release);
-             nvsWriteBool("inj", true);
-             Serial.println("[WiFi] Injector: ON");
-           } else if (cmdVal == '0') {
-             isInjectorEnabled.store(false, std::memory_order_release);
-             nvsWriteBool("inj", false);
-             Serial.println("[WiFi] Injector: OFF");
-           }
-        }
-        else if (cmd.startsWith("BLE:ON")) {
+        if (cmd.startsWith("BLE:ON")) {
            Serial.println("[WiFi] Switch to BLE mode requested");
            transportMode.store(TRANSPORT_BLE, std::memory_order_release);
            // Mode saved by loop() auto-save
@@ -229,6 +226,65 @@ void initWiFiMode() {
       
       transportMode.store(TRANSPORT_BLE, std::memory_order_release);
       nvsWriteString("mode", "BLE");
+    });
+    
+    // === HTTP API: Inject Enable/Disable ===
+    // Simple HTTP toggle (alternative to WebSocket INJECT:1/0 and BLE)
+    wsServer.on("/inject_on", HTTP_GET, [](AsyncWebServerRequest *request){
+      isInjectorEnabled.store(true, std::memory_order_release);
+      nvsWriteBool("inj", true);
+      Serial.println("[HTTP] Injector: ON");
+      request->send(200, "text/plain", "Injector ENABLED");
+    });
+    wsServer.on("/inject_off", HTTP_GET, [](AsyncWebServerRequest *request){
+      isInjectorEnabled.store(false, std::memory_order_release);
+      nvsWriteBool("inj", false);
+      Serial.println("[HTTP] Injector: OFF");
+      request->send(200, "text/plain", "Injector DISABLED");
+    });
+    
+    // === HTTP API: Inject Status ===
+    wsServer.on("/inject_status", HTTP_GET, [](AsyncWebServerRequest *request){
+      bool injEnabled = isInjectorEnabled.load(std::memory_order_acquire);
+      float amp = atomicAmpereRaw.load(std::memory_order_acquire) / 10.0f;
+      
+      bool localBms = false;
+      bool localChrConn = false;
+      bool localOriDet = false;
+      
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        localBms = bmsChargingFlag;
+        localChrConn = chargerConnected;
+        localOriDet = oriChargerDetected;
+        xSemaphoreGive(dataMutex);
+      }
+      
+      VehicleMode mode = atomicMode.load(std::memory_order_acquire);
+      bool modeOK = (mode == MODE_PARK || mode == MODE_CHARGING || mode == MODE_STAND);
+      
+      char buf[320];
+      snprintf(buf, sizeof(buf),
+        "{"
+        "\"injectorEnabled\":%s,"
+        "\"bmsCharging\":%s,"
+        "\"chargerConnected\":%s,"
+        "\"oriCharger\":%s,"
+        "\"ampere\":%.1f,"
+        "\"vehicleMode\":\"%s\","
+        "\"modeAllowsInject\":%s,"
+        "\"twaiMode\":\"%s\""
+        "}",
+        injEnabled ? "true" : "false",
+        localBms ? "true" : "false",
+        localChrConn ? "true" : "false",
+        localOriDet ? "true" : "false",
+        amp,
+        getModeString(mode),
+        modeOK ? "true" : "false",
+        currentTwaiModeNormal ? "NORMAL" : "LISTEN_ONLY"
+      );
+      
+      request->send(200, "application/json", buf);
     });
     
     wsHandlersRegistered = true;

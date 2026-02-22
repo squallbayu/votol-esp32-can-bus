@@ -47,7 +47,9 @@
 #include "wifi_handler.h"
 
 // === Vehicle Mode Enum (thread-safe) ===
-// Must be defined before atomic usage
+// Shared definition in wifi_handler.h, guarded against duplicate
+#ifndef VEHICLE_MODE_ENUM_DEFINED
+#define VEHICLE_MODE_ENUM_DEFINED
 enum VehicleMode : uint8_t {
   MODE_PARK = 0,
   MODE_STAND,
@@ -57,20 +59,9 @@ enum VehicleMode : uint8_t {
   MODE_REVERSE,
   MODE_BRAKE
 };
+#endif
 
-// Mode to string lookup (for JSON output)
-static const char* const modeStrings[] = {
-  "PARK", "STAND", "CHARGING", "DRIVE", "SPORT", "REVERSE", "BRAKE"
-};
-static const uint8_t MODE_STRING_COUNT = sizeof(modeStrings) / sizeof(modeStrings[0]);
-
-static inline const char* getModeString(VehicleMode m) {
-  // Bounds check to prevent crash on corrupted/invalid enum value
-  // Explicit cast to uint8_t for safety against compiler quirks
-  uint8_t mVal = static_cast<uint8_t>(m);
-  if (mVal >= MODE_STRING_COUNT) return "UNKNOWN";
-  return modeStrings[mVal];
-}
+// getModeString() and modeStrings[] now defined in wifi_handler.h
 
 // === Transport Mode Enum (BLE vs WiFi) ===
 #ifndef TRANSPORT_MODE_ENUM_DEFINED
@@ -202,7 +193,8 @@ float valPower = 0.0f;
 
 Preferences preferences;
 int valSOC = 0;
-std::atomic<bool> isInjectorEnabled{false}; // Atomic: accessed from BLE callback (Core 1) + CAN task (Core 0)
+std::atomic<bool> isInjectorEnabled{false}; // Atomic: accessed from BLE/WiFi (Core 1) + CAN task (Core 0)
+bool currentTwaiModeNormal = false;          // TWAI mode: false=LISTEN_ONLY, true=NORMAL
 unsigned long lastPeriodicSave = 0;  // Last periodic backup timestamp
 bool shutdownSaved = false;          // Flag to prevent multiple shutdown saves
 std::atomic<bool> canDataReady{false};  // Atomic: true after first valid SOC received from CAN
@@ -565,12 +557,20 @@ void handleCANMessage(twai_message_t &msg) {
   }
 
   // ORI Charger Detection (0x10261041) - only present with original charger
+  // CRITICAL FIX: In NORMAL mode, ESP32 receives its own transmitted messages!
+  // If we're in NORMAL mode, WE are the sender → ignore to prevent self-detection
+  // which would set oriChargerDetected=true → oriTimeout=false → kill our own injector.
+  // Only detect ORI charger in LISTEN_ONLY mode (we can't TX, so it must be real ORI).
   if (id == 0x10261041) {
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
-      oriChargerDetected = true;
-      lastOriChargerMsg = millis();
-      xSemaphoreGive(dataMutex);
+    if (!currentTwaiModeNormal) {
+      // We're in LISTEN_ONLY → this IS from ORI charger
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        oriChargerDetected = true;
+        lastOriChargerMsg = millis();
+        xSemaphoreGive(dataMutex);
+      }
     }
+    // else: In NORMAL mode → this is our own echo, ignore
     return;
   }
 
@@ -594,7 +594,7 @@ bool isCanBusHealthy() {
 // =============================================
 // DYNAMIC TWAI MODE SWITCHER
 // =============================================
-bool currentTwaiModeNormal = false; // By default we start in LISTEN_ONLY (false)
+// currentTwaiModeNormal is declared in global variables section above
 
 void switchTwaiMode(bool normalMode) {
   if (currentTwaiModeNormal == normalMode) return; // Already in target mode
@@ -626,39 +626,24 @@ void switchTwaiMode(bool normalMode) {
 // =============================================
 // CAN INJECTOR (Simulate Original Charger)
 // =============================================
+// Caller must ensure TWAI is in NORMAL mode before calling.
+// Mode management is handled by the CAN task loop.
 void injectChargerMessage() {
-  // Before injecting, we MUST be in NORMAL mode to allow TX (Transmit)
-  switchTwaiMode(true);
-  
-  if (!isCanBusHealthy()) {
-    switchTwaiMode(false); // Revert back if not healthy
-    return;
-  }
+  if (!currentTwaiModeNormal) return;
   
   twai_message_t tx_msg;
-  memset(&tx_msg, 0, sizeof(tx_msg));  // Zero-init ALL fields (critical: rtr must be 0)
+  memset(&tx_msg, 0, sizeof(tx_msg));
   tx_msg.identifier = 0x10261041;
   tx_msg.extd = 1;
   tx_msg.data_length_code = 8;
   tx_msg.data[0] = 0x05;
   tx_msg.data[1] = 0x0A;
   tx_msg.data[2] = 0x1C;
-  tx_msg.data[3] = 0x00;
-  tx_msg.data[4] = 0x00;
-  tx_msg.data[5] = 0x00;
-  tx_msg.data[6] = 0x00;
-  tx_msg.data[7] = 0x00;
 
-  // Queue the message for transmission with short timeout
-  // Try once with small wait, if fails just skip this cycle
-  esp_err_t result = twai_transmit(&tx_msg, pdMS_TO_TICKS(5));
-  if (result != ESP_OK && result != ESP_ERR_TIMEOUT) {
-    // Only log on unexpected errors, not on timeout (queue full)
-    // Serial.printf("[CAN] Inject failed: %d\n", result);
+  esp_err_t result = twai_transmit(&tx_msg, pdMS_TO_TICKS(100));
+  if (result != ESP_OK) {
+    Serial.printf("[CAN-INJ] TX FAIL: 0x%x\n", result);
   }
-  
-  // After injection we switch back to LISTEN_ONLY so we don't spam ACK to the speedometer
-  switchTwaiMode(false);
 }
 
 
@@ -791,14 +776,20 @@ void canTask(void *pvParameters) {
     }
 
     // Injector Logic for Third-Party Charger
-    // FIX: Add charger disconnect detection to prevent injection after charger is unplugged
+    // FIX v2: Third-party chargers do NOT send CAN messages, so we can't rely on
+    // chargerConnected flag. Instead detect charging via BMS charging flag + positive current.
+    // 
+    // From CAN sniff data:
+    //   - Third-party charger: 0x0AB40D09 byte[0]=0x01 (BMS sees charging),
+    //     current=4.2-4.3A, but mode stays PARK because no 0x10261041 injected.
+    //   - ORI charger sends 0x10261041 itself, so injector must NOT interfere.
+    //
     // Only inject if:
     // 1. Injector enabled by user
-    // 2. BMS reports charging state
-    // 3. ORI charger not detected (timeout 2s)
-    // 4. External charger is ACTUALLY connected (chargerConnected flag valid, not timed out)
-    // 5. Charging current is positive (>1A to filter out noise/REGEN)
-    // This prevents false "charging" indication during REGEN after charger disconnect
+    // 2. BMS reports charging state (0x0AB40D09 byte[0]=1)
+    // 3. ORI charger not detected (no 0x10261041 for >2s)
+    // 4. Charging current is positive (>1A to filter noise/REGEN)
+    //    OR external CAN charger is connected (chargerConnected flag)
     
     // Snapshot current ampere value under mutex
     float currentAmpere = 0.0f;
@@ -807,22 +798,56 @@ void canTask(void *pvParameters) {
       xSemaphoreGive(dataMutex);
     }
     
-    // Only inject if charger is physically connected AND charging current is positive
-    bool chargerActuallyActive = localChargerConnected && 
-                                 (millis() - localLastChargerMsg < CHARGER_TIMEOUT_MS) &&
-                                 (currentAmpere > 1.0f);  // Positive current >1A = real charging
+    // Detect real charging: either CAN-connected charger OR BMS+current indicate charging
+    bool canChargerActive = localChargerConnected && 
+                            (millis() - localLastChargerMsg < CHARGER_TIMEOUT_MS);
+    bool thirdPartyCharging = localBmsCharging && (currentAmpere > 1.0f);
+    bool chargerActuallyActive = canChargerActive || thirdPartyCharging;
     
-    if (isInjectorEnabled.load(std::memory_order_acquire) && 
-        localBmsCharging && 
-        (millis() - localLastOriChargerMsg > 2000) &&
-        chargerActuallyActive) {
+    // SAFETY: Only inject when vehicle is stationary.
+    // This prevents false injection during REGEN braking where current is also positive.
+    // Valid stationary modes: PARK(0x00), CHARGING(0x61), STAND(0x78/0x08)
+    // Blocked modes: DRIVE, SPORT, REVERSE, BRAKE (vehicle is moving/decelerating)
+    VehicleMode currentMode = atomicMode.load(std::memory_order_acquire);
+    bool modeAllowsInjection = (currentMode == MODE_PARK || 
+                                currentMode == MODE_CHARGING || 
+                                currentMode == MODE_STAND);
+    
+    bool injEnabled = isInjectorEnabled.load(std::memory_order_acquire);
+    bool oriTimeout = (millis() - localLastOriChargerMsg > 2000);
+    
+    // Determine if injection should be active
+    // All 5 conditions must be true:
+    // 1. User enabled injector (via WebSocket/BLE/HTTP)
+    // 2. BMS reports charging state
+    // 3. Vehicle in PARK or CHARGING (prevents false inject during REGEN)
+    // 4. No ORI charger present (prevents interference)
+    // 5. Actual charging detected (current > 1A or CAN charger connected)
+    bool shouldInject = injEnabled && 
+                        localBmsCharging && 
+                        modeAllowsInjection &&
+                        oriTimeout &&
+                        chargerActuallyActive;
+    
+    // === TWAI Mode Management ===
+    // Switch to NORMAL mode when inject is needed (with bus sync delay)
+    if (shouldInject && !currentTwaiModeNormal) {
+      switchTwaiMode(true);
+      vTaskDelay(pdMS_TO_TICKS(50));  // Wait for bus synchronization
+    }
+    
+    // Auto-inject every 500ms when all conditions met
+    if (shouldInject && currentTwaiModeNormal) {
        if (millis() - lastInjectTime > INJECTOR_INTERVAL_MS) {
          injectChargerMessage();
          lastInjectTime = millis();
        }
     }
 
-
+    // Switch back to LISTEN_ONLY when injection no longer needed (2s grace period)
+    if (currentTwaiModeNormal && !shouldInject && (millis() - lastInjectTime > 2000)) {
+      switchTwaiMode(false);
+    }
 
     // Adaptive rate limiting: faster when driving, slower when charging
     // Driving: 50Hz (20ms) for responsive real-time data
@@ -875,13 +900,15 @@ static bool buildFastJson() {
     "\"t\":{\"c\":%d,\"m\":%d,\"b\":%d},"  // temps: ctrl, motor, batt
     "\"cr\":%lu,"         // canRate
     "\"hb\":%lu,"         // heartbeat
+    "\"inj\":%d,"         // injector enabled
     "\"type\":\"fast\""   // indicator for fast update
     "}\n",
     localRPM, localSpeed, getModeString(localMode),
     localVolts, localAmpere, localPower, localSOC,
     localCtrlTemp, localMotorTemp, localBattTemp,
     (unsigned long)localCanRate,
-    (unsigned long)heartbeatCounter++
+    (unsigned long)heartbeatCounter++,
+    isInjectorEnabled.load(std::memory_order_acquire) ? 1 : 0
   );
   if (fastLen < 0) fastLen = 0;
   if ((size_t)fastLen >= sizeof(bleTxBuf)) {
@@ -1021,6 +1048,7 @@ static bool buildFullJson() {
     "\"chr\":{\"on\":%d,\"v\":%.1f,\"a\":%.1f,\"ori\":%d},"
     "\"bms\":{\"hw\":\"%s\",\"fw\":\"%s\"},"
     "\"hb\":%lu,"
+    "\"inj\":%d,"
     "\"type\":\"full\""
     "}\n",
     localRPM, localSpeed, getModeString(localMode),
@@ -1037,7 +1065,8 @@ static bool buildFullJson() {
     (localChargerCurrent > 0.1f) ? localChargerCurrent : fabs(localAmpere), // Fallback to system amps
     (millis() - localLastOriChargerMsg < ORI_CHARGER_TIMEOUT_MS && localOriCharger) ? 1 : 0,  // charger.ori = 0/1
     localHwVersion, localFwVersion,
-    (unsigned long)heartbeatCounter++
+    (unsigned long)heartbeatCounter++,
+    isInjectorEnabled.load(std::memory_order_acquire) ? 1 : 0
   );
   if (fullLen < 0) fullLen = 0;
   if ((size_t)fullLen >= sizeof(bleTxBuf)) {
