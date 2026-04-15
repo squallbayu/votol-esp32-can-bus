@@ -80,8 +80,9 @@ enum TransportMode : uint8_t {
 
 #define LED_PIN 2
 
-#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define SERVICE_UUID                  "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID           "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define WEB_SNAPSHOT_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
 
 
@@ -102,6 +103,11 @@ static const uint32_t DRIVE_SLOW_MS = 1000;
 // BRAKE: Super fast for capturing peak regenerative amps
 static const uint32_t BRAKE_FAST_MS = 50;
 static const uint32_t BRAKE_SLOW_MS = 1000;
+
+// Web snapshot cadence - slower than the native BLE stream to keep ESP load low.
+static const uint32_t WEB_SNAPSHOT_IDLE_MS = 1000;
+static const uint32_t WEB_SNAPSHOT_DRIVE_MS = 350;
+static const uint32_t WEB_SNAPSHOT_BRAKE_MS = 250;
 
 // Timeout constants (ms)
 static const uint32_t CHARGER_TIMEOUT_MS = 5000;    // Reset charger status after no CAN msg
@@ -130,6 +136,7 @@ TaskHandle_t bleTaskHandle = NULL;
 
 BLEServer* pServer = nullptr;
 BLECharacteristic* pCharacteristic = nullptr;
+BLECharacteristic* pWebSnapshotCharacteristic = nullptr;
 std::atomic<bool> deviceConnected{false};  // Atomic: BLE callback (any core) + BLE task
 bool oldDeviceConnected = false;
 
@@ -314,11 +321,13 @@ unsigned long heartbeatCounter = 0;
 
 // === BLE TX state (BLE task only) ===
 static char bleTxBuf[2200];        // Full JSON buffer
+static char webSnapshotBuf[768];   // Compact full-state snapshot for Web Bluetooth read()
 static uint16_t bleTxLen = 0;
 static uint16_t bleTxOffset = 0;
 static bool bleTxInProgress = false;
 static uint32_t lastFastSend = 0;  // Last fast update time
 static uint32_t lastSlowSend = 0;  // Last slow update time
+static uint32_t lastWebSnapshotRefresh = 0;
 
 // =============================================
 // CAN PARSING (runs on Core 0)
@@ -1077,6 +1086,142 @@ static bool buildFullJson() {
   return true;
 }
 
+// Build a compact full-state snapshot that fits in a single characteristic read.
+// This keeps Web Bluetooth stable without changing the notify stream used by Android.
+static void updateWebSnapshotValue() {
+  if (pWebSnapshotCharacteristic == nullptr) return;
+  if (!deviceConnected.load(std::memory_order_acquire)) return;
+
+  int localRPM = atomicRPM.load(std::memory_order_acquire);
+  int localSpeed = atomicSpeed.load(std::memory_order_acquire);
+  float localAmpere = atomicAmpereRaw.load(std::memory_order_acquire) / 10.0f;
+  float localVolts = atomicVoltsRaw.load(std::memory_order_acquire) / 10.0f;
+  float localPower = (float)atomicPowerRaw.load(std::memory_order_acquire);
+  VehicleMode localMode = atomicMode.load(std::memory_order_acquire);
+
+  int localSOC, localCtrlTemp, localMotorTemp, localBattTemp;
+  int localSOH, localCycleCount;
+  float localRemainingCap, localFullCap;
+  uint16_t localCells[23];
+  uint16_t localHighestVolt, localLowestVolt, localAvgVolt;
+  uint8_t localHighestNum, localLowestNum;
+  uint8_t localBalanceMode, localBalanceStatus, localBalanceBits[4];
+  float localChargerVolt, localChargerCurrent;
+  bool localBmsChargingFlag;
+  bool localOriCharger;
+  unsigned long localLastOriChargerMsg;
+  uint32_t localCanRate;
+
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
+
+  localSOC = valSOC;
+  localCtrlTemp = valCtrlTemp;
+  localMotorTemp = valMotorTemp;
+  localBattTemp = valBattTemp;
+  localSOH = valSOH;
+  localCycleCount = valCycleCount;
+  localRemainingCap = valRemainingCapacity;
+  localFullCap = valFullCapacity;
+  localHighestVolt = valHighestCellVolt;
+  localHighestNum = valHighestCellNum;
+  localLowestVolt = valLowestCellVolt;
+  localLowestNum = valLowestCellNum;
+  localAvgVolt = valAvgCellVolt;
+  localBalanceMode = valBalanceMode;
+  localBalanceStatus = valBalanceStatus;
+  memcpy(localBalanceBits, valBalanceBits, sizeof(localBalanceBits));
+  memcpy(localCells, valCells, sizeof(localCells));
+  localChargerVolt = valChargerVoltage;
+  localChargerCurrent = valChargerCurrent;
+  localBmsChargingFlag = bmsChargingFlag;
+  localOriCharger = oriChargerDetected;
+  localLastOriChargerMsg = lastOriChargerMsg;
+  localCanRate = canMessagesPerSec.load(std::memory_order_acquire);
+
+  xSemaphoreGive(dataMutex);
+
+  uint16_t minCell = 9999, maxCell = 0;
+  for (int i = 0; i < 23; i++) {
+    if (localCells[i] > 0 && localCells[i] < minCell) minCell = localCells[i];
+    if (localCells[i] > maxCell) maxCell = localCells[i];
+  }
+  int cellDelta = (minCell > maxCell) ? 0 : ((int)maxCell - (int)minCell);
+
+  char balanceCells[64];
+  int bpos = 0;
+  for (int i = 0; i < 23; i++) {
+    int byteIndex = i / 8;
+    int bitIndex = i % 8;
+    bool isBalancing = (localBalanceBits[byteIndex] & (1 << bitIndex)) != 0;
+    int written = snprintf(
+      balanceCells + bpos,
+      sizeof(balanceCells) - bpos,
+      "%d%s",
+      isBalancing ? 1 : 0,
+      (i < 22) ? "," : ""
+    );
+    if (written > 0) bpos += written;
+  }
+
+  char cellsStr[160];
+  int cpos = 0;
+  for (int i = 0; i < 23; i++) {
+    int written = snprintf(
+      cellsStr + cpos,
+      sizeof(cellsStr) - cpos,
+      "%u%s",
+      localCells[i],
+      (i < 22) ? "," : ""
+    );
+    if (written > 0) cpos += written;
+  }
+
+  int snapshotLen = snprintf(
+    webSnapshotBuf,
+    sizeof(webSnapshotBuf),
+    "{\"r\":%d,"
+    "\"s\":%d,"
+    "\"m\":\"%s\","
+    "\"v\":%.1f,"
+    "\"a\":%.1f,"
+    "\"p\":%.0f,"
+    "\"sc\":%d,"
+    "\"t\":{\"c\":%d,\"m\":%d,\"b\":%d},"
+    "\"cells\":[%s],"
+    "\"cd\":%d,"
+    "\"cr\":%lu,"
+    "\"h\":{\"soh\":%d,\"cyc\":%u,\"rc\":%.1f,\"fc\":%.1f},"
+    "\"cvs\":{\"hi\":%u,\"hiC\":%u,\"lo\":%u,\"loC\":%u,\"av\":%u,\"delta\":%d},"
+    "\"b\":{\"md\":%u,\"st\":%u,\"cells\":[%s]},"
+    "\"chr\":{\"on\":%d,\"v\":%.1f,\"a\":%.1f,\"ori\":%d},"
+    "\"hb\":%lu,"
+    "\"inj\":%d,"
+    "\"type\":\"full\""
+    "}\n",
+    localRPM, localSpeed, getModeString(localMode),
+    localVolts, localAmpere, localPower, localSOC,
+    localCtrlTemp, localMotorTemp, localBattTemp,
+    cellsStr, cellDelta,
+    (unsigned long)localCanRate,
+    localSOH, localCycleCount, localRemainingCap, localFullCap,
+    localHighestVolt, localHighestNum, localLowestVolt, localLowestNum, localAvgVolt, cellDelta,
+    localBalanceMode, localBalanceStatus, balanceCells,
+    localBmsChargingFlag ? 1 : 0,
+    (localChargerVolt > 0.1f) ? localChargerVolt : localVolts,
+    (localChargerCurrent > 0.1f) ? localChargerCurrent : fabs(localAmpere),
+    (millis() - localLastOriChargerMsg < ORI_CHARGER_TIMEOUT_MS && localOriCharger) ? 1 : 0,
+    (unsigned long)heartbeatCounter,
+    isInjectorEnabled.load(std::memory_order_acquire) ? 1 : 0
+  );
+
+  if (snapshotLen <= 0 || (size_t)snapshotLen >= sizeof(webSnapshotBuf)) {
+    Serial.printf("[BLE] Web snapshot too large or invalid: %d bytes\n", snapshotLen);
+    return;
+  }
+
+  pWebSnapshotCharacteristic->setValue((uint8_t*)webSnapshotBuf, snapshotLen);
+}
+
 static void startBleTxIfIdle(bool useFast) {
   if (!deviceConnected.load(std::memory_order_acquire)) return;
   if (bleTxInProgress) return;
@@ -1089,6 +1234,12 @@ static void startBleTxIfIdle(bool useFast) {
   }
   
   if (!ok) return; // SKIP jika build gagal, jangan kirim data stale
+
+  const uint32_t now = millis();
+  if (!useFast || (now - lastWebSnapshotRefresh) >= getWebSnapshotInterval()) {
+    updateWebSnapshotValue();
+    lastWebSnapshotRefresh = now;
+  }
   
   bleTxOffset = 0;
   bleTxInProgress = true;
@@ -1171,6 +1322,21 @@ static uint32_t getSlowUpdateInterval() {
   }
 }
 
+static uint32_t getWebSnapshotInterval() {
+  VehicleMode mode = atomicMode.load(std::memory_order_acquire);
+
+  switch (mode) {
+    case MODE_BRAKE:
+      return WEB_SNAPSHOT_BRAKE_MS;
+    case MODE_DRIVE:
+    case MODE_SPORT:
+    case MODE_REVERSE:
+      return WEB_SNAPSHOT_DRIVE_MS;
+    default:
+      return WEB_SNAPSHOT_IDLE_MS;
+  }
+}
+
 
 
 // =============================================
@@ -1204,6 +1370,13 @@ static void initBLEServer() {
   pCharacteristic->addDescriptor(&ble2902Descriptor);
   static MyCallbacks charCallbacks;
   pCharacteristic->setCallbacks(&charCallbacks);
+
+  pWebSnapshotCharacteristic = pService->createCharacteristic(
+    WEB_SNAPSHOT_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ
+  );
+  pWebSnapshotCharacteristic->setValue("{}\n");
+
   pService->start();
   
   setupOtaService(pServer);
@@ -1237,6 +1410,8 @@ static void stopBLE() {
   BLEDevice::deinit(false);  // false = don't release memory (we'll reinit later)
   pServer = nullptr;
   pCharacteristic = nullptr;
+  pWebSnapshotCharacteristic = nullptr;
+  lastWebSnapshotRefresh = 0;
   delay(200);  // Let BT controller fully release
   
   // Stop Bluetooth controller at hardware level
